@@ -235,6 +235,7 @@ let rule_repr =
     ; Repr.field "context" (Repr.option Repr.string) ~get:rule_context
     ; Repr.field "action" action_repr ~get:(fun rule ->
         rule.Dune_engine.Reflection.Rule.action)
+    ; Repr.field "loc" Loc.repr ~get:(fun rule -> rule.Dune_engine.Reflection.Rule.loc)
     ]
 ;;
 

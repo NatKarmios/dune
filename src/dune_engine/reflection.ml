@@ -9,6 +9,7 @@ module Rule = struct
     ; expanded_deps : Path.Set.t
     ; targets : Targets.Validated.t
     ; action : Action.t
+    ; loc : Loc.t
     }
 end
 
@@ -74,6 +75,7 @@ let evaluate_rule =
            ; expanded_deps
            ; targets = rule.targets
            ; action = action.action
+           ; loc = rule.loc
            })
   in
   Memo.exec memo
