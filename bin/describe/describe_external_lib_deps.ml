@@ -137,6 +137,16 @@ let exes_extensions (lib_config : Dune_rules.Lib_config.t) modes =
       ~ext_dll:lib_config.ext_dll)
 ;;
 
+let exes_names (exes : Executables.t) =
+  let names = Nonempty_list.to_list_map exes.names ~f:snd in
+  match exes.public_names with
+  | None -> names
+  | Some public_names ->
+    let public_names = Nonempty_list.to_list_map public_names ~f:snd in
+    List.map2 names public_names ~f:(fun name public_name ->
+      Option.value public_name ~default:name)
+;;
+
 let libs db (context : Context.t) =
   let open Memo.O in
   let* dune_files = Context.name context |> Dune_rules.Dune_load.dune_files in
@@ -152,7 +162,7 @@ let libs db (context : Context.t) =
           dir
           exes.buildable.libraries
           exes.buildable.preprocess.config
-          (Nonempty_list.to_list_map exes.names ~f:snd)
+          (exes_names exes)
           exes.package
           Item.Kind.Executables
           (exes_extensions ocaml.lib_config exes.modes)
