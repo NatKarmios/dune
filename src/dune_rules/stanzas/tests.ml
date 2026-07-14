@@ -52,13 +52,15 @@ let gen_parse names =
             (Syntax.since Stanza.syntax (3, 9)
              >>> Enabled_if.decode_value ~allowed_vars:Any ())
         in
+        let names = Nonempty_list.of_list_exn names in
         { exes =
             { Executables.link_flags
             ; link_deps = []
             ; modes
             ; optional = false
             ; buildable
-            ; names = Nonempty_list.of_list_exn names
+            ; names
+            ; public_names = Nonempty_list.map names ~f:(fun _ -> None)
             ; package = None
             ; promote = None
             ; install_conf = None

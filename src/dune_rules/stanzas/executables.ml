@@ -6,6 +6,7 @@ module Names : sig
   type t
 
   val names : t -> (Loc.t * string) Nonempty_list.t
+  val public_names : t -> (Loc.t * string) option Nonempty_list.t
   val package : t -> Package.t option
   val has_public_name : t -> bool
 
@@ -33,6 +34,17 @@ end = struct
     }
 
   let names t = t.names
+
+  let public_names t =
+    match t.public with
+    | None -> Nonempty_list.map t.names ~f:(fun _ -> None)
+    | Some { public_names; _ } ->
+      (* [public_names] has the same length as [names], so [of_list_exn] is
+         safe. *)
+      List.map public_names ~f:(fun (loc, s) -> Option.map s ~f:(fun s -> loc, s))
+      |> Nonempty_list.of_list_exn
+  ;;
+
   let package t = Option.map t.public ~f:(fun p -> p.package)
   let has_public_name t = Option.is_some t.public
 
@@ -411,6 +423,7 @@ end
 
 type t =
   { names : (Loc.t * string) Nonempty_list.t
+  ; public_names : (Loc.t * string) option Nonempty_list.t
   ; link_flags : Link_flags.Spec.t
   ; link_deps : Dep_conf.t list
   ; modes : Loc.t Link_mode.Map.t
@@ -546,6 +559,7 @@ let common =
           [ Pp.textf "This field can only be used when linking a plugin." ]
     in
     { names = private_names
+    ; public_names = Names.public_names names
     ; link_flags
     ; link_deps
     ; modes

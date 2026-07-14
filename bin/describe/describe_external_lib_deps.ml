@@ -42,15 +42,27 @@ module Item = struct
     ; external_deps : lib_dep list
     ; internal_deps : lib_dep list
     ; names : string list
+    ; public_names : string option list
     ; package : Package.t option
     ; extensions : Filename.Extension.t list
     }
 
-  let to_dyn { kind; dir; external_deps; internal_deps; names; package; extensions } =
+  let to_dyn
+        { kind
+        ; dir
+        ; external_deps
+        ; internal_deps
+        ; names
+        ; public_names
+        ; package
+        ; extensions
+        }
+    =
     let open Dyn in
     let record =
       record
         [ "names", (list string) names
+        ; "public_names", (list (option string)) public_names
         ; "extensions", (list Filename.Extension.to_dyn) extensions
         ; "package", option Package.Name.to_dyn (Option.map ~f:Package.name package)
         ; "source_dir", String (Path.Source.to_string dir)
@@ -112,7 +124,7 @@ let resolve_lib_deps db lib_deps =
   >>| List.concat
 ;;
 
-let resolve_libs db dir libraries preprocess names package kind extensions =
+let resolve_libs db dir libraries preprocess names public_names package kind extensions =
   let open Memo.O in
   let open Item in
   let* lib_deps = resolve_lib_deps db libraries in
@@ -124,7 +136,7 @@ let resolve_libs db dir libraries preprocess names package kind extensions =
       | Local lib -> Either.Left lib
       | External lib -> Either.Right lib)
   in
-  { external_deps; internal_deps; kind; names; package; dir; extensions }
+  { external_deps; internal_deps; kind; names; public_names; package; dir; extensions }
 ;;
 
 let exes_extensions (lib_config : Dune_rules.Lib_config.t) modes =
@@ -153,17 +165,24 @@ let libs db (context : Context.t) =
           exes.buildable.libraries
           exes.buildable.preprocess.config
           (Nonempty_list.to_list_map exes.names ~f:snd)
+          (Nonempty_list.to_list_map exes.public_names ~f:(Option.map ~f:snd))
           exes.package
           Item.Kind.Executables
           (exes_extensions ocaml.lib_config exes.modes)
         >>| List.singleton
       | Dune_rules.Library.T lib ->
+        let public_name =
+          match lib.visibility with
+          | Public _ -> Some (Dune_rules.Library.best_name lib |> Lib_name.to_string)
+          | Private _ -> None
+        in
         resolve_libs
           db
           dir
           lib.buildable.libraries
           lib.buildable.preprocess.config
-          [ Dune_rules.Library.best_name lib |> Lib_name.to_string ]
+          [ Lib_name.of_local lib.name |> Lib_name.to_string ]
+          [ public_name ]
           (Dune_rules.Library.package lib)
           Item.Kind.Library
           []
@@ -176,6 +195,7 @@ let libs db (context : Context.t) =
           tests.exes.buildable.libraries
           tests.exes.buildable.preprocess.config
           (Nonempty_list.to_list_map tests.exes.names ~f:snd)
+          (Nonempty_list.to_list_map tests.exes.public_names ~f:(Option.map ~f:snd))
           (if Option.is_none tests.package then tests.exes.package else tests.package)
           Item.Kind.Tests
           (exes_extensions ocaml.lib_config tests.exes.modes)

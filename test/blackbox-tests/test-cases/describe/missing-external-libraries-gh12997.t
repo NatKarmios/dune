@@ -26,6 +26,7 @@
    (build_context _build/default)
    (library
     ((name alive)
+     (public_name ())
      (uid $DIGEST)
      (local true)
      (requires ())

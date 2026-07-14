@@ -15,6 +15,7 @@ external library dependencies of a simple project
   (default
    ((library
      ((names (dummypkg))
+      (public_names ((dummypkg)))
       (extensions ())
       (package (dummypkg))
       (source_dir .)
@@ -24,6 +25,7 @@ external library dependencies of a simple project
       (internal_deps ())))
     (tests
      ((names (test))
+      (public_names (()))
       (extensions
        (.bc .exe))
       (package (dummypkg))

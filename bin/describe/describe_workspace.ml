@@ -144,7 +144,10 @@ module Descr = struct
   (* Description of executables *)
   module Exe = struct
     type t =
-      { names : string list (* names of the executable *)
+      { names : string list (* private names of the executable *)
+      ; public_names : string option list
+        (* public names, paired positionally with [names] ([None] when the
+             executable has no public name) *)
       ; requires : Digest.t list
         (* list of direct dependencies to libraries, identified by their
              digests *)
@@ -155,10 +158,11 @@ module Descr = struct
     let map_path t ~f = { t with include_dirs = List.map ~f t.include_dirs }
 
     (* Conversion to the [Dyn.t] type *)
-    let to_dyn options { names; requires; modules; include_dirs } : Dyn.t =
+    let to_dyn options { names; public_names; requires; modules; include_dirs } : Dyn.t =
       let open Dyn in
       record
-        [ "names", List (List.map ~f:(fun name -> String name) names)
+        [ "names", list string names
+        ; "public_names", list (option string) public_names
         ; "requires", Dyn.(list string) (List.map ~f:Digest.to_string requires)
         ; "modules", list (Mod.to_dyn options) modules
         ; "include_dirs", list dyn_path include_dirs
@@ -170,7 +174,8 @@ module Descr = struct
 
   module Lib = struct
     type t =
-      { name : Lib_name.t (* name of the library *)
+      { name : Lib_name.t (* private name of the library *)
+      ; public_name : Lib_name.t option (* public name, if any *)
       ; uid : Digest.t (* digest of the library *)
       ; local : bool (* whether this library is local *)
       ; requires : Digest.t list
@@ -187,12 +192,15 @@ module Descr = struct
     ;;
 
     (* Conversion to the [Dyn.t] type *)
-    let to_dyn options { name; uid; local; requires; source_dir; modules; include_dirs }
+    let to_dyn
+          options
+          { name; public_name; uid; local; requires; source_dir; modules; include_dirs }
       : Dyn.t
       =
       let open Dyn in
       record
         [ "name", Lib_name.to_dyn name
+        ; "public_name", option Lib_name.to_dyn public_name
         ; "uid", String (Digest.to_string uid)
         ; "local", Bool local
         ; "requires", (list string) (List.map ~f:Digest.to_string requires)
@@ -466,6 +474,8 @@ module Crawl = struct
          let include_dirs = Obj_dir.all_cmis obj_dir in
          let exe_descr =
            { Descr.Exe.names = Nonempty_list.to_list_map exes.names ~f:snd
+           ; public_names =
+               Nonempty_list.to_list_map exes.public_names ~f:(Option.map ~f:snd)
            ; requires = List.map ~f:uid_of_library libs
            ; modules
            ; include_dirs
@@ -480,8 +490,13 @@ module Crawl = struct
     match Resolve.peek requires with
     | Error () -> Memo.return None
     | Ok requires ->
-      let name = Lib.name lib in
       let info = Lib.info lib in
+      let name = Lib_id.name (Lib_info.lib_id info) in
+      let public_name =
+        if Lib_info.Status.is_private (Lib_info.status info)
+        then None
+        else Some (Lib.name lib)
+      in
       let src_dir = Lib_info.src_dir info in
       let obj_dir = Lib_info.obj_dir info in
       let+ modules_ =
@@ -527,6 +542,7 @@ module Crawl = struct
       let include_dirs = Obj_dir.all_cmis obj_dir in
       let lib_descr =
         { Descr.Lib.name
+        ; public_name
         ; uid = uid_of_library lib
         ; local = Lib.is_local lib
         ; requires = List.map requires ~f:uid_of_library

@@ -70,6 +70,7 @@ not stable across different setups.
    (build_context _build/default)
    (executables
     ((names (exe))
+     (public_names (()))
      (requires ())
      (modules
       (((name Exe)
@@ -84,6 +85,7 @@ not stable across different setups.
    (build_context _build/default)
    (library
     ((name lib)
+     (public_name ())
      (uid $DIGEST)
      (local true)
      (requires ())
@@ -101,6 +103,7 @@ not stable across different setups.
    (build_context _build/default)
    (executables
     ((names (exe))
+     (public_names (()))
      (requires
       ($DIGEST1
        $DIGEST2
@@ -126,6 +129,7 @@ not stable across different setups.
      (include_dirs (_build/default/exe/.exe.eobjs/byte))))
    (library
     ((name compiler-libs)
+     (public_name (compiler-libs))
      (uid $DIGEST1)
      (local false)
      (requires ())
@@ -134,6 +138,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/compiler-libs))))
    (library
     ((name compiler-libs.common)
+     (public_name (compiler-libs.common))
      (uid $DIGEST2)
      (local false)
      (requires ($DIGEST1))
@@ -142,6 +147,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/compiler-libs))))
    (library
     ((name dummy_ppx)
+     (public_name ())
      (uid $DIGEST15)
      (local true)
      (requires
@@ -158,6 +164,7 @@ not stable across different setups.
      (include_dirs (_build/default/dummy_ppx/.dummy_ppx.objs/byte))))
    (library
     ((name ocaml-compiler-libs.common)
+     (public_name (ocaml-compiler-libs.common))
      (uid $DIGEST3)
      (local false)
      (requires ($DIGEST2))
@@ -166,6 +173,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ocaml-compiler-libs/common))))
    (library
     ((name ocaml-compiler-libs.shadow)
+     (public_name (ocaml-compiler-libs.shadow))
      (uid $DIGEST7)
      (local false)
      (requires ())
@@ -174,6 +182,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ocaml-compiler-libs/shadow))))
    (library
     ((name ppx_derivers)
+     (public_name (ppx_derivers))
      (uid $DIGEST9)
      (local false)
      (requires ())
@@ -182,6 +191,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppx_derivers))))
    (library
     ((name ppxlib)
+     (public_name (ppxlib))
      (uid $DIGEST13)
      (local false)
      (requires
@@ -200,6 +210,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib))))
    (library
     ((name ppxlib.ast)
+     (public_name (ppxlib.ast))
      (uid $DIGEST6)
      (local false)
      (requires
@@ -209,6 +220,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib/ast))))
    (library
     ((name ppxlib.astlib)
+     (public_name (ppxlib.astlib))
      (uid $DIGEST4)
      (local false)
      (requires
@@ -218,6 +230,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib/astlib))))
    (library
     ((name ppxlib.print_diff)
+     (public_name (ppxlib.print_diff))
      (uid $DIGEST8)
      (local false)
      (requires ())
@@ -226,6 +239,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib/print_diff))))
    (library
     ((name ppxlib.stdppx)
+     (public_name (ppxlib.stdppx))
      (uid $DIGEST12)
      (local false)
      (requires
@@ -235,6 +249,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib/stdppx))))
    (library
     ((name ppxlib.traverse_builtins)
+     (public_name (ppxlib.traverse_builtins))
      (uid $DIGEST10)
      (local false)
      (requires ())
@@ -243,6 +258,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib/traverse_builtins))))
    (library
     ((name sexplib0)
+     (public_name (sexplib0))
      (uid $DIGEST11)
      (local false)
      (requires ())
@@ -251,6 +267,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/sexplib0))))
    (library
     ((name static_lib)
+     (public_name ())
      (uid $DIGEST14)
      (local true)
      (requires ())
@@ -264,6 +281,7 @@ not stable across different setups.
      (include_dirs (_build/default/static_lib/.static_lib.objs/byte))))
    (library
     ((name stdlib-shims)
+     (public_name (stdlib-shims))
      (uid $DIGEST5)
      (local false)
      (requires ())
@@ -276,6 +294,7 @@ not stable across different setups.
    (build_context _build/default)
    (library
     ((name compiler-libs)
+     (public_name (compiler-libs))
      (uid $DIGEST1)
      (local false)
      (requires ())
@@ -284,6 +303,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/compiler-libs))))
    (library
     ((name compiler-libs.common)
+     (public_name (compiler-libs.common))
      (uid $DIGEST2)
      (local false)
      (requires ($DIGEST1))
@@ -292,6 +312,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/compiler-libs))))
    (library
     ((name dummy_ppx)
+     (public_name ())
      (uid $DIGEST3)
      (local true)
      (requires
@@ -308,6 +329,7 @@ not stable across different setups.
      (include_dirs (_build/default/dummy_ppx/.dummy_ppx.objs/byte))))
    (library
     ((name lib)
+     (public_name ())
      (uid $DIGEST7)
      (local true)
      (requires ())
@@ -321,6 +343,7 @@ not stable across different setups.
      (include_dirs (_build/default/lib/.lib.objs/byte))))
    (library
     ((name ocaml-compiler-libs.common)
+     (public_name (ocaml-compiler-libs.common))
      (uid $DIGEST8)
      (local false)
      (requires ($DIGEST2))
@@ -329,6 +352,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ocaml-compiler-libs/common))))
    (library
     ((name ocaml-compiler-libs.shadow)
+     (public_name (ocaml-compiler-libs.shadow))
      (uid $DIGEST9)
      (local false)
      (requires ())
@@ -337,6 +361,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ocaml-compiler-libs/shadow))))
    (library
     ((name ppx_derivers)
+     (public_name (ppx_derivers))
      (uid $DIGEST10)
      (local false)
      (requires ())
@@ -345,6 +370,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppx_derivers))))
    (library
     ((name ppxlib)
+     (public_name (ppxlib))
      (uid $DIGEST5)
      (local false)
      (requires
@@ -363,6 +389,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib))))
    (library
     ((name ppxlib.ast)
+     (public_name (ppxlib.ast))
      (uid $DIGEST4)
      (local false)
      (requires
@@ -372,6 +399,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib/ast))))
    (library
     ((name ppxlib.astlib)
+     (public_name (ppxlib.astlib))
      (uid $DIGEST11)
      (local false)
      (requires
@@ -381,6 +409,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib/astlib))))
    (library
     ((name ppxlib.print_diff)
+     (public_name (ppxlib.print_diff))
      (uid $DIGEST12)
      (local false)
      (requires ())
@@ -389,6 +418,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib/print_diff))))
    (library
     ((name ppxlib.stdppx)
+     (public_name (ppxlib.stdppx))
      (uid $DIGEST14)
      (local false)
      (requires
@@ -398,6 +428,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib/stdppx))))
    (library
     ((name ppxlib.traverse_builtins)
+     (public_name (ppxlib.traverse_builtins))
      (uid $DIGEST13)
      (local false)
      (requires ())
@@ -406,6 +437,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib/traverse_builtins))))
    (library
     ((name sexplib0)
+     (public_name (sexplib0))
      (uid $DIGEST16)
      (local false)
      (requires ())
@@ -414,6 +446,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/sexplib0))))
    (library
     ((name static_lib)
+     (public_name ())
      (uid $DIGEST6)
      (local true)
      (requires ())
@@ -427,6 +460,7 @@ not stable across different setups.
      (include_dirs (_build/default/static_lib/.static_lib.objs/byte))))
    (library
     ((name stdlib-shims)
+     (public_name (stdlib-shims))
      (uid $DIGEST15)
      (local false)
      (requires ())

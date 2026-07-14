@@ -6,6 +6,7 @@ print only the external libraries by dir.
   (default
    ((library
      ((names (inter_lib))
+      (public_names (()))
       (extensions ())
       (package ())
       (source_dir lib)
@@ -13,6 +14,7 @@ print only the external libraries by dir.
       (internal_deps ())))
     (library
      ((names (foo))
+      (public_names (()))
       (extensions ())
       (package ())
       (source_dir .)
