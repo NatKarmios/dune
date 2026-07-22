@@ -1,6 +1,7 @@
 module Metrics0 = Metrics
 open! Import
 module Metrics = Metrics0
+module Graph = Dune_graph.Graph
 module Console = Console
 module Debug = Memo_debug
 module Event = Spec.Event

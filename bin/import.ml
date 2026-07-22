@@ -88,4 +88,5 @@ include struct
 end
 
 module Dune_rpc = Dune_rpc.Private
+module Graph = Dune_graph.Graph
 include Let_syntax
