@@ -436,7 +436,7 @@ val lazy_node
 val dump_cached_graph
   :  ?on_not_cached:[ `Ignore | `Raise ]
   -> ?time_nodes:bool
-  -> ('i, 'o) Node.t
+  -> ('i, 'o) Node.t list
   -> Dune_graph.Graph.t Fiber.t
 
 module Lazy : sig

@@ -195,8 +195,8 @@ let create_rec
   Stdlib.Lazy.force table
 ;;
 
-let dump_cached_graph ?(on_not_cached = `Raise) ?(time_nodes = false) node =
-  let rec collect_graph (Dep_node.T dep_node) graph : Graph.t Fiber.t =
+let dump_cached_graph ?(on_not_cached = `Raise) ?(time_nodes = false) nodes =
+  let rec collect_graph' (Dep_node.T dep_node) graph : Graph.t Fiber.t =
     let src_id = Id.to_int dep_node.id in
     match get_cached_deps_in_current_run dep_node with
     | Some deps ->
@@ -223,15 +223,21 @@ let dump_cached_graph ?(on_not_cached = `Raise) ?(time_nodes = false) node =
           let graph = Graph.add_edge graph ~src_id ~dst_id in
           if Graph.has_node graph ~id:dst_id
           then Fiber.return graph
-          else collect_graph packed graph)
+          else collect_graph' packed graph)
     | None ->
       (match on_not_cached with
        | `Raise -> failwith "Memo graph contains uncached nodes"
        | `Ignore -> Fiber.return graph)
   in
+  let rec collect_graph graph = function
+    | [] -> return graph
+    | node :: nodes ->
+      let* graph' = collect_graph' (Dep_node.T node) graph in
+      collect_graph graph' nodes
+  in
   Error_handler.with_error_handler
     (fun (_ : Exn_with_backtrace.t) -> Fiber.return ())
-    (fun () -> collect_graph (Dep_node.T node) Graph.empty)
+    (fun () -> collect_graph Graph.empty nodes)
 ;;
 
 let get_call_stack = Call_stack.get_call_stack_without_state
