@@ -592,6 +592,12 @@ let shared_with_config_file ~allow_pkg_flag =
   }
 ;;
 
+type dump_memo_graph =
+  { file : Path.External.t option
+  ; format : Graph.File_format.t
+  ; with_timing : bool
+  }
+
 module Builder = struct
   type t =
     { no_build : No_build.t
@@ -608,6 +614,7 @@ module Builder = struct
     ; store_orig_src_dir : bool
     ; default_target : Arg.Dep.t (* For build & runtest only *)
     ; watch : Dune_rpc_impl.Watch_mode_config.t
+    ; dump_memo_graph : dump_memo_graph
     ; dump_gc_stats : Path.External.t option
     ; always_show_command_line : bool
     ; promote_install_files : bool
@@ -762,6 +769,37 @@ module Builder = struct
       match res with
       | None -> Dune_rpc_impl.Watch_mode_config.No
       | Some mode -> Yes mode
+    and+ dump_memo_graph_file =
+      Arg.(
+        value
+        & opt (some string) None
+        & info
+            [ "dump-memo-graph" ]
+            ~docs
+            ~docv:"FILE"
+            ~doc:(Some "Dump the dependency graph to a file after the build is complete."))
+    and+ dump_memo_graph_format =
+      Arg.(
+        value
+        & opt graph_format Gexf
+        & info
+            [ "dump-memo-graph-format" ]
+            ~docs
+            ~docv:"FORMAT"
+            ~doc:(Some "Set the file format used by $(b,--dump-memo-graph)"))
+    and+ dump_memo_graph_with_timing =
+      Arg.(
+        value
+        & flag
+        & info
+            [ "dump-memo-graph-with-timing" ]
+            ~docs
+            ~doc:
+              (Some
+                 "Re-run each cached node in the Memo graph after building and include \
+                  the run duration in the output of $(b,--dump-memo-graph). Since all \
+                  nodes contain a cached value, each measurement will only account for a \
+                  single node."))
     and+ dump_gc_stats =
       Arg.(
         value
@@ -986,6 +1024,14 @@ module Builder = struct
     ; store_orig_src_dir
     ; default_target
     ; watch
+    ; dump_memo_graph =
+        { file =
+            Option.map
+              dump_memo_graph_file
+              ~f:Path.External.of_filename_relative_to_initial_cwd
+        ; format = dump_memo_graph_format
+        ; with_timing = dump_memo_graph_with_timing
+        }
     ; dump_gc_stats =
         Option.map dump_gc_stats ~f:Path.External.of_filename_relative_to_initial_cwd
     ; always_show_command_line
@@ -1040,6 +1086,7 @@ module Builder = struct
         ; store_orig_src_dir
         ; default_target
         ; watch
+        ; dump_memo_graph
         ; dump_gc_stats
         ; always_show_command_line
         ; promote_install_files
@@ -1074,6 +1121,9 @@ module Builder = struct
     && Bool.equal t.store_orig_src_dir store_orig_src_dir
     && Arg.Dep.equal t.default_target default_target
     && Dune_rpc_impl.Watch_mode_config.equal t.watch watch
+    && Option.equal Path.External.equal t.dump_memo_graph.file dump_memo_graph.file
+    && Graph.File_format.equal t.dump_memo_graph.format dump_memo_graph.format
+    && Bool.equal t.dump_memo_graph.with_timing dump_memo_graph.with_timing
     && Option.equal Path.External.equal t.dump_gc_stats dump_gc_stats
     && Bool.equal t.always_show_command_line always_show_command_line
     && Bool.equal t.promote_install_files promote_install_files
@@ -1115,6 +1165,7 @@ let root t = t.root
 let build_loop t = t.build_loop
 let watch t = t.builder.watch
 let x t = t.builder.workspace_config.x
+let dump_memo_graph t = t.builder.dump_memo_graph
 let file_watcher t = t.builder.file_watcher
 let sandbox_actions t = t.builder.sandbox_actions
 let prefix_target t s = t.root.reach_from_root_prefix ^ s

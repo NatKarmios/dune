@@ -5,19 +5,51 @@ let action_builder_of_request request =
   Action_builder.of_memo (Memo.of_thunk Util.setup) >>= request
 ;;
 
-let run_build_system ~action_runner ~run_id ~request =
+let dump_memo_graph (dump_memo_graph_args : Common.dump_memo_graph option) toplevel_cell =
+  let open Fiber.O in
+  match dump_memo_graph_args with
+  | None | Some { file = None; _ } -> Fiber.return ()
+  | Some { file = Some file; format; with_timing } ->
+    let path = Path.external_ file in
+    let+ graph = Memo.dump_cached_graph ~time_nodes:with_timing toplevel_cell in
+    Graph.serialize graph ~path ~format
+;;
+
+let run_build_system ~action_runner ~dump_memo_graph_args ~run_id ~request =
   let build =
     Dune_engine.Process.Build.create
       ~action_runner
       ~run_id
       ~cancellation:(Fiber.Cancel.create ())
   in
-  action_builder_of_request request
-  |> Dune_engine.Build_system.Request.Goal.create
-  |> List.singleton
-  |> Dune_engine.Build_system.Request.create
-  |> Dune_engine.Build_system.run_build_requests ~build_started_at:(Time.now ()) ~build
+  let request =
+    action_builder_of_request request
+    |> Dune_engine.Build_system.Request.Goal.create
+    |> List.singleton
+    |> Dune_engine.Build_system.Request.create
+  in
+  let open Fiber.O in
+  let toplevel_cell, toplevel =
+    Memo.Lazy.Expert.create ~name:"toplevel" (fun () ->
+      request
+      |> Dune_engine.Build_system.run_build_requests
+           ~build_started_at:(Time.now ())
+           ~build
+      |> Memo.of_non_reproducible_fiber)
+  in
+  let* res = Memo.run (Memo.Lazy.force toplevel) in
+  match res with
+  | Error _ as e -> Fiber.return e
+  | Ok () ->
+    let+ () = dump_memo_graph dump_memo_graph_args toplevel_cell in
+    Ok ()
 ;;
+
+(* >>= function *)
+(* | Error _ as e -> Fiber.return e *)
+(* | Ok () -> *)
+(*   let+ () = dump_memo_graph common in *)
+(*   Ok () *)
 
 let run_build_command_poll ~(common : Common.t) ~config ~sticky_goal : unit =
   let build_loop = Common.build_loop common in
@@ -34,6 +66,7 @@ let run_build_command_once ~(common : Common.t) ~config ~request =
   let once () =
     run_build_system
       ~action_runner:(Common.action_runner common)
+      ~dump_memo_graph_args:(Some (Common.dump_memo_graph common))
       ~run_id:Dune_engine.Run_id.Batch
       ~request
     >>| function
@@ -208,3 +241,4 @@ let build =
 
 let build_memo f = Build_system.run f
 let build_memo_exn f = Build_system.run_exn f
+let run_build_system = run_build_system ~dump_memo_graph_args:None

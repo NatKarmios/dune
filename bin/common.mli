@@ -2,6 +2,12 @@ open Dune_config_file
 
 type t
 
+type dump_memo_graph =
+  { file : Import.Path.External.t option
+  ; format : Dune_graph.Graph.File_format.t
+  ; with_timing : bool
+  }
+
 (* [x t] returns the [Context_name.t] of of the cross-compilation context, if
   there is any *)
 val x : t -> Dune_engine.Context_name.t option
@@ -16,6 +22,7 @@ val rpc
      | `Forbid_builds (** Promise not to build anything. For now, this isn't checked *)
      ]
 
+val dump_memo_graph : t -> dump_memo_graph
 val watch_exclusions : t -> string list
 val watch : t -> Dune_rpc_impl.Watch_mode_config.t
 val file_watcher : t -> Dune_scheduler.Scheduler.Run.file_watcher
