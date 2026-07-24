@@ -1234,11 +1234,21 @@ let evaluate_action_builder request =
 module Request = struct
   module Goal = struct
     type t =
-      { build : unit Action_builder.t
+      { (* The top-level Memo node for this goal, wrapping the evaluation of the
+           goal's action builder. Forcing it runs the goal and records the whole
+           build as its dependencies, so it can be handed to
+           [Memo.dump_cached_graph]. *)
+        toplevel : (unit, unit) Memo.Node.t
       ; outcome : Build_outcome.t Fiber.Ivar.t
       }
 
-    let create build = { build; outcome = Fiber.Ivar.create () }
+    let create build =
+      let toplevel, (_ : unit Memo.Lazy.t) =
+        Memo.Lazy.Expert.create ~name:"toplevel" (fun () -> evaluate_action_builder build)
+      in
+      { toplevel; outcome = Fiber.Ivar.create () }
+    ;;
+
     let await t = Fiber.Ivar.read t.outcome
     let is_finished t = Option.is_some (Fiber.Ivar.peek t.outcome)
 
@@ -1249,7 +1259,7 @@ module Request = struct
         | None -> Fiber.Ivar.fill t.outcome outcome)
     ;;
 
-    let build t = t.build
+    let toplevel t = t.toplevel
   end
 
   type completion =
@@ -1264,6 +1274,7 @@ module Request = struct
   let create goals = { goals; completion = Complete_goals }
   let cancel_completion t = t.completion <- Do_not_complete_goals
   let goals t = t.goals
+  let toplevel_nodes t = List.map t.goals ~f:Goal.toplevel
 end
 
 let complete_action_runner_build = function
@@ -1299,7 +1310,7 @@ let run_build_requests ?restart_started_at ~build_started_at ?build (request : R
   let run_request goal =
     Fiber.collect_errors (fun () ->
       Memo.run_with_error_handler ~handle_error_no_raise:report_early_exn (fun () ->
-        Request.Goal.build goal |> evaluate_action_builder))
+        Memo.Node.read (Request.Goal.toplevel goal)))
     >>= function
     | Ok () ->
       let+ () = finish_request goal Success in

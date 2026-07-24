@@ -68,6 +68,11 @@ module Request : sig
     val await : t -> Build_outcome.t Fiber.t
     val is_finished : t -> bool
     val complete : t -> Build_outcome.t -> unit Fiber.t
+
+    (** The top-level Memo node for this goal. After the build it holds the
+        goal's whole dependency graph, so it can be passed to
+        [Memo.dump_cached_graph]. *)
+    val toplevel : t -> (unit, unit) Memo.Node.t
   end
 
   type t
@@ -77,6 +82,9 @@ module Request : sig
   (** Prevent this request from completing goals that have not already
       completed. *)
   val cancel_completion : t -> unit
+
+  (** The top-level Memo node of each goal in the request. *)
+  val toplevel_nodes : t -> (unit, unit) Memo.Node.t list
 end
 
 val run_build_requests

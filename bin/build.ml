@@ -5,13 +5,13 @@ let action_builder_of_request request =
   Action_builder.of_memo (Memo.of_thunk Util.setup) >>= request
 ;;
 
-let dump_memo_graph (dump_memo_graph_args : Common.dump_memo_graph option) toplevel_cell =
+let dump_memo_graph (dump_memo_graph_args : Common.dump_memo_graph option) toplevel_nodes =
   let open Fiber.O in
   match dump_memo_graph_args with
   | None | Some { file = None; _ } -> Fiber.return ()
   | Some { file = Some file; format; with_timing } ->
     let path = Path.external_ file in
-    let+ graph = Memo.dump_cached_graph ~time_nodes:with_timing toplevel_cell in
+    let+ graph = Memo.dump_cached_graph ~time_nodes:with_timing toplevel_nodes in
     Graph.serialize graph ~path ~format
 ;;
 
@@ -29,27 +29,22 @@ let run_build_system ~action_runner ~dump_memo_graph_args ~run_id ~request =
     |> Dune_engine.Build_system.Request.create
   in
   let open Fiber.O in
-  let toplevel_cell, toplevel =
-    Memo.Lazy.Expert.create ~name:"toplevel" (fun () ->
+  let* res =
+    Dune_engine.Build_system.run_build_requests
+      ~build_started_at:(Time.now ())
+      ~build
       request
-      |> Dune_engine.Build_system.run_build_requests
-           ~build_started_at:(Time.now ())
-           ~build
-      |> Memo.of_non_reproducible_fiber)
   in
-  let* res = Memo.run (Memo.Lazy.force toplevel) in
   match res with
   | Error _ as e -> Fiber.return e
   | Ok () ->
-    let+ () = dump_memo_graph dump_memo_graph_args toplevel_cell in
+    let+ () =
+      dump_memo_graph
+        dump_memo_graph_args
+        (Dune_engine.Build_system.Request.toplevel_nodes request)
+    in
     Ok ()
 ;;
-
-(* >>= function *)
-(* | Error _ as e -> Fiber.return e *)
-(* | Ok () -> *)
-(*   let+ () = dump_memo_graph common in *)
-(*   Ok () *)
 
 let run_build_command_poll ~(common : Common.t) ~config ~sticky_goal : unit =
   let build_loop = Common.build_loop common in
