@@ -201,17 +201,27 @@ let dump_cached_graph ?(on_not_cached = `Raise) ?(time_nodes = false) nodes =
     match get_cached_deps_in_current_run dep_node with
     | Some deps ->
       let* attributes =
-        if time_nodes
-        then (
-          let start = Time.now () in
-          (* CR-someday cmoseley: We could record errors here and include them
-             as part of the graph. *)
-          let+ (_ : (_, Collect_errors_monoid.t) result) =
-            Exec.report_and_collect_errors (fun () -> dep_node.spec.f dep_node.input)
+        let attr_map = [] in
+        let attr_map =
+          let module Input = (val dep_node.spec.input : Store_intf.Input with type t = _)
           in
-          let runtime = Time.Span.to_secs (Time.diff (Time.now ()) start) in
-          String.Map.of_list_exn [ "runtime", Graph.Attribute.Float runtime ])
-        else Fiber.return String.Map.empty
+          let input = dep_node.input |> Input.to_dyn |> Dyn.to_string in
+          ("input", Graph.Attribute.String input) :: attr_map
+        in
+        let+ attr_map =
+          if time_nodes
+          then (
+            let start = Time.now () in
+            (* CR-someday cmoseley: We could record errors here and include them
+             as part of the graph. *)
+            let+ (_ : (_, Collect_errors_monoid.t) result) =
+              Exec.report_and_collect_errors (fun () -> dep_node.spec.f dep_node.input)
+            in
+            let runtime = Time.Span.to_secs (Time.diff (Time.now ()) start) in
+            ("runtime", Graph.Attribute.Float runtime) :: attr_map)
+          else Fiber.return attr_map
+        in
+        String.Map.of_list_exn attr_map
       in
       let graph = Graph.add_node graph ~id:src_id ?label:dep_node.spec.name ~attributes in
       List.fold_left
