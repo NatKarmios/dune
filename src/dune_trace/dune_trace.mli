@@ -26,6 +26,7 @@ module Category : sig
     | Artifact_substitution
     | Thread
     | Runtime
+    | Graph
 end
 
 module Event : sig
