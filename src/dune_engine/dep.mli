@@ -14,6 +14,7 @@ val file_selector : File_selector.t -> t
 val alias : Alias.t -> t
 val compare : t -> t -> Ordering.t
 val repr : t Repr.t
+val to_dyn : t -> Dyn.t
 
 module Map : sig
   type dep := t
@@ -23,6 +24,8 @@ module Map : sig
   val has_universe : _ t -> bool
   val parallel_map : 'a t -> f:(dep -> 'a -> 'b Memo.t) -> 'b t Memo.t
 end
+
+module Table : Hashtbl.S with type key := t
 
 module Fact : sig
   (** A fact about the world. For instance:

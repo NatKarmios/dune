@@ -48,6 +48,7 @@ module Id : sig
   type t
 
   val compare : t -> t -> Ordering.t
+  val to_int : t -> int
 
   include Comparable_intf.S with type key := t
 end

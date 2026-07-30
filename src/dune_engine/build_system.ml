@@ -527,6 +527,8 @@ module Internal = struct
       Target_promotion.promote ~targets ~promote ~promote_source
 
   and execute_rule_impl ~rule_kind rule =
+    Graph_trace.Exec_rule.start ~rule
+    @@ fun graph_trace ->
     let { Rule.id = _; targets; mode; action; info = _; loc } = rule in
     let head_target = Targets.Validated.head targets in
     let* execution_parameters =
@@ -545,6 +547,7 @@ module Internal = struct
        memoized, and the result is not expected to change often, so we do not
        sacrifice too much performance here by executing it sequentially. *)
     let* action, facts = Action_builder.evaluate_and_collect_facts action in
+    graph_trace.deps facts;
     let wrap_fiber f =
       Memo.of_reproducible_fiber
         (if Loc.is_none loc
@@ -611,7 +614,7 @@ module Internal = struct
           false
         | _ -> true
       in
-      let* (produced_targets : Digest.t Targets.Produced.t) =
+      let* (produced_targets : Digest.t Targets.Produced.t), outcome =
         (* Step I. Check if the workspace-local cache is up to date. *)
         Rule_cache.Workspace_local.lookup
           ~always_rerun
@@ -620,7 +623,9 @@ module Internal = struct
           ~env:action.env
           ~build_deps
         >>= function
-        | Some produced_targets -> Fiber.return produced_targets
+        | Some produced_targets ->
+          let outcome = Graph_trace.Exec_rule.Local_cache_hit in
+          Fiber.return (produced_targets, outcome)
         | None ->
           (* Step II. Remove stale targets both from the digest table and from
              the build directory. *)
@@ -651,7 +656,7 @@ module Internal = struct
                 ~file:remove_target_file
                 ~dir:remove_target_dir)
           in
-          let* produced_targets, dynamic_deps_stages =
+          let* produced_targets, dynamic_deps_stages, outcome =
             (* Step III. Try to restore artifacts from the shared cache. *)
             Dune_cache.Shared.lookup ~can_go_in_shared_cache ~rule_digest ~targets
             >>= function
@@ -663,7 +668,8 @@ module Internal = struct
                  is precisely the reason why we don't store dynamic actions in
                  the shared cache. *)
               let dynamic_deps_stages = [] in
-              Fiber.return (produced_targets, dynamic_deps_stages)
+              let outcome = Graph_trace.Exec_rule.Shared_cache_hit in
+              Fiber.return (produced_targets, dynamic_deps_stages, outcome)
             | None ->
               (* Step IV. Execute the build action. *)
               let* exec_result =
@@ -699,7 +705,8 @@ module Internal = struct
                       Dep.Facts.digest fact_map d ~env:action.env;
                       Digest.Manual.get d ))
               in
-              Fiber.return (produced_targets, dynamic_deps_stages)
+              let outcome = Graph_trace.Exec_rule.Executed in
+              Fiber.return (produced_targets, dynamic_deps_stages, outcome)
           in
           (* We do not include target names into [targets_digest] because they
              are already included into the rule digest. *)
@@ -709,7 +716,7 @@ module Internal = struct
             ~rule_digest
             ~dynamic_deps_stages
             ~targets_digest:(Targets.Produced.digest produced_targets);
-          Fiber.return produced_targets
+          Fiber.return (produced_targets, outcome)
       in
       let+ () =
         promote_targets
@@ -717,6 +724,7 @@ module Internal = struct
           ~targets:produced_targets
           ~promote_source:config.promote_source
       in
+      graph_trace.finish outcome;
       produced_targets)
     (* jeremidimino: We need to include the dependencies discovered while
        running the action here. Otherwise, package dependencies are broken in

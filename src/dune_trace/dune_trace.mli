@@ -281,6 +281,23 @@ module Event : sig
 
   val debug : (string * Dyn.t) list -> t
   val artifact_substitution : file:Path.t -> placeholder:Dyn.t -> value:string -> t
+
+  module Graph : sig
+    module Exec_rule : sig
+      type outcome =
+        | Executed
+        | Local_cache_hit
+        | Shared_cache_hit
+
+      (* Each of these returns the event proper, preceded by an [intern-targets] /
+       [intern-deps] event for targets or dependencies seen for the first
+       time. Emit the whole list (e.g. with [emit_all]) so that ids are declared
+       before they are referenced. *)
+      val start : id:int -> targets:targets -> start:Time.t -> t list
+      val finish : id:int -> targets:targets -> outcome:outcome -> start:Time.t -> t list
+      val deps : id:int -> deps:Dyn.t list -> t list
+    end
+  end
 end
 
 module File_watcher_event : sig
