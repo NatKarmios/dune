@@ -283,6 +283,15 @@ module Event : sig
   val artifact_substitution : file:Path.t -> placeholder:Dyn.t -> value:string -> t
 
   module Graph : sig
+    type forced_by =
+      | Top_level
+      | Rule of int
+      | Dune_dyn of Path.Source.t
+      | Gen_rules of
+          { dir : Path.Build.t
+          ; source_dir : Path.Source.t option
+          }
+
     module Exec_rule : sig
       type outcome =
         | Executed
@@ -292,10 +301,45 @@ module Event : sig
       (* Each of these returns the event proper, preceded by an [intern-targets] /
        [intern-deps] event for targets or dependencies seen for the first
        time. Emit the whole list (e.g. with [emit_all]) so that ids are declared
-       before they are referenced. *)
-      val start : id:int -> targets:targets -> start:Time.t -> t list
-      val finish : id:int -> targets:targets -> outcome:outcome -> start:Time.t -> t list
-      val deps : id:int -> deps:Dyn.t list -> t list
+       before they are referenced. [tid] is the event's Chrome-trace lane. *)
+      val start
+        :  id:int
+        -> targets:targets
+        -> forced_by:forced_by
+        -> start:Time.t
+        -> tid:int
+        -> t list
+
+      val finish
+        :  id:int
+        -> targets:targets
+        -> outcome:outcome
+        -> forced_by:forced_by
+        -> start:Time.t
+        -> tid:int
+        -> t list
+
+      val deps : id:int -> tid:int -> dyn:bool -> deps:Dyn.t list -> t list
+    end
+
+    module Dune_dyn : sig
+      val start : id:int -> start:Time.t -> tid:int -> t
+      val finish : id:int -> start:Time.t -> tid:int -> t
+    end
+
+    module Gen_rules : sig
+      val dir_start : id:int -> dir:Path.Build.t -> start:Time.t -> tid:int -> t
+      val dir_finish : id:int -> start:Time.t -> tid:int -> t
+
+      val dune_file_start
+        :  id:int
+        -> dir:Path.Build.t
+        -> source_dir:Path.Source.t
+        -> start:Time.t
+        -> tid:int
+        -> t
+
+      val dune_file_finish : id:int -> start:Time.t -> tid:int -> t
     end
   end
 end

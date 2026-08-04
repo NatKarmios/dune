@@ -547,7 +547,7 @@ module Internal = struct
        memoized, and the result is not expected to change often, so we do not
        sacrifice too much performance here by executing it sequentially. *)
     let* action, facts = Action_builder.evaluate_and_collect_facts action in
-    graph_trace.deps facts;
+    graph_trace.deps (Dep.Set.of_keys facts);
     let wrap_fiber f =
       Memo.of_reproducible_fiber
         (if Loc.is_none loc
@@ -700,6 +700,7 @@ module Internal = struct
                 List.map
                   exec_result.action_exec_result.dynamic_deps_stages
                   ~f:(fun (deps, fact_map) ->
+                    graph_trace.deps ~dyn:true deps;
                     ( deps
                     , let d = Digest.Manual.create () in
                       Dep.Facts.digest fact_map d ~env:action.env;

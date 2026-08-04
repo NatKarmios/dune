@@ -49,6 +49,7 @@ All the event types from chrome and field per type:
         "name",
         "ph",
         "pid",
+        "tid",
         "ts"
       ]
     },
@@ -60,6 +61,7 @@ All the event types from chrome and field per type:
         "name",
         "ph",
         "pid",
+        "tid",
         "ts"
       ]
     }

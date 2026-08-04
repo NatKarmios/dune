@@ -26,12 +26,17 @@ mappings, and the exec events refer to them by id thereafter.
 
   $ DUNE_TRACE=+graph dune build out.txt
 
-The category emits five event kinds:
+The category emits these event kinds (the "gen-rules-*" events span rule
+generation for a directory and its dune file):
 
   $ dune trace cat | jq -r 'select(.cat == "graph") | .name' | sort -u
   exec-rule-deps
   exec-rule-finish
   exec-rule-start
+  gen-rules-dir-finish
+  gen-rules-dir-start
+  gen-rules-dune-file-finish
+  gen-rules-dune-file-start
   intern-deps
   intern-targets
 

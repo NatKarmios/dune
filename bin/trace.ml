@@ -179,9 +179,18 @@ let times_of_sexp (sexp : Sexp.t) =
 
 let pid = lazy (Unix.getpid ())
 
+(* Graph events carry a "tid" arg (a lane, see [Dune_engine.Graph_trace]) so that
+   overlapping spans render on separate Chrome-trace threads. *)
+let tid_of_sexp rest =
+  List.find_map rest ~f:(function
+    | Sexp.List [ Atom "tid"; Atom t ] -> int_of_string_opt t
+    | _ -> None)
+;;
+
 let json_of_event ~chrome (sexp : Sexp.t) =
   let cat, name, ts, rest, _ = base_of_sexp sexp in
   let ts, dur = times_of_sexp ts in
+  let tid = tid_of_sexp rest in
   let rest =
     List.map rest ~f:(function
       | Sexp.List [ Atom ("process_args" as k); List v ] ->
@@ -217,7 +226,12 @@ let json_of_event ~chrome (sexp : Sexp.t) =
       | None -> "i"
       | Some _ -> "X"
     in
-    Json.assoc (base @ [ "ph", Json.string kind; "pid", Json.int (Lazy.force pid) ])
+    Json.assoc
+      (base
+       @ [ "ph", Json.string kind ]
+       @ [ "pid", Json.int (Lazy.force pid)
+         ; "tid", Json.int (Option.value tid ~default:0)
+         ])
 ;;
 
 let cat =

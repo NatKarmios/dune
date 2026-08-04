@@ -62,6 +62,7 @@ include struct
   module Response_file = Response_file
   module Subdir_set = Subdir_set
   module Fs = Fs
+  module Graph_trace = Graph_trace
 end
 
 module Compound_user_error = Dune_rpc.Private.Compound_user_error

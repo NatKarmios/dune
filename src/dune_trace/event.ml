@@ -1086,6 +1086,34 @@ module Graph = struct
         | _ :: _ -> Some (k, Arg.list (List.map ids ~f:Arg.int)))
   ;;
 
+  type forced_by =
+    | Top_level
+    | Rule of int
+    | Dune_dyn of Path.Source.t
+    | Gen_rules of
+        { dir : Path.Build.t
+        ; source_dir : Path.Source.t option
+        }
+
+  let forced_by_arg forced_by =
+    let parts =
+      match forced_by with
+      | Top_level -> [ Arg.string "top-level" ]
+      | Rule id -> [ Arg.string "rule"; Arg.int id ]
+      | Dune_dyn path -> [ Arg.string "dune-dyn"; Arg.source_path path ]
+      | Gen_rules { dir; source_dir } ->
+        Arg.string "gen-rules"
+        :: Arg.build_path dir
+        ::
+        (match source_dir with
+         | None -> []
+         | Some source_dir -> [ Arg.source_path source_dir ])
+    in
+    "forced_by", Arg.list parts
+  ;;
+
+  let tid_arg tid = "tid", Arg.int tid
+
   module Exec_rule = struct
     type outcome =
       | Executed
@@ -1098,25 +1126,32 @@ module Graph = struct
       | Shared_cache_hit -> "shared-cache-hit"
     ;;
 
-    let start ~id ~targets ~start =
+    let start ~id ~targets ~forced_by ~start ~tid =
       let intern_events, file_ids, dir_ids = intern_targets ~ts:start targets in
-      let args = ("id", Arg.int id) :: target_args ~file_ids ~dir_ids in
+      let args =
+        ("id", Arg.int id)
+        :: tid_arg tid
+        :: forced_by_arg forced_by
+        :: target_args ~file_ids ~dir_ids
+      in
       intern_events @ [ Event.instant ~args ~name:"exec-rule-start" start Graph ]
     ;;
 
-    let finish ~id ~targets ~outcome ~start =
+    let finish ~id ~targets ~outcome ~forced_by ~start ~tid =
       let stop = Time.now () in
       let intern_events, file_ids, dir_ids = intern_targets ~ts:stop targets in
       let dur = Time.diff stop start in
       let args =
         ("id", Arg.int id)
+        :: tid_arg tid
         :: ("outcome", Arg.string (outcome_to_string outcome))
+        :: forced_by_arg forced_by
         :: target_args ~file_ids ~dir_ids
       in
       intern_events @ [ Event.complete ~args ~name:"exec-rule-finish" ~start ~dur Graph ]
     ;;
 
-    let deps ~id ~deps =
+    let deps ~id ~tid ~dyn ~deps =
       let ts = Time.now () in
       let new_entries = ref [] in
       let dep_ids =
@@ -1132,8 +1167,80 @@ module Graph = struct
         | [] -> []
         | entries -> [ intern_deps_event ~ts entries ]
       in
-      let args = [ "id", Arg.int id; "deps", Arg.list (List.map dep_ids ~f:Arg.int) ] in
+      let args =
+        [ "id", Arg.int id
+        ; tid_arg tid
+        ; "dyn", Arg.bool dyn
+        ; "deps", Arg.list (List.map dep_ids ~f:Arg.int)
+        ]
+      in
       intern_events @ [ Event.instant ~args ~name:"exec-rule-deps" ts Graph ]
+    ;;
+  end
+
+  module Dune_dyn = struct
+    let start ~id ~start ~tid =
+      Event.instant
+        ~args:[ "id", Arg.int id; tid_arg tid ]
+        ~name:"dune-dyn-start"
+        start
+        Graph
+    ;;
+
+    let finish ~id ~start ~tid =
+      let dur = Time.diff (Time.now ()) start in
+      Event.complete
+        ~args:[ "id", Arg.int id; tid_arg tid ]
+        ~name:"dune-dyn-finish"
+        ~start
+        ~dur
+        Graph
+    ;;
+  end
+
+  module Gen_rules = struct
+    (* Span events for rule generation. [dir_*] attribute a directory (the
+       outermost [gen_rules]); [dune_file_*] attribute a directory together with
+       its dune file (the standalone/root case). *)
+    let dir_start ~id ~dir ~start ~tid =
+      Event.instant
+        ~args:[ "id", Arg.int id; tid_arg tid; "dir", Arg.build_path dir ]
+        ~name:"gen-rules-dir-start"
+        start
+        Graph
+    ;;
+
+    let dir_finish ~id ~start ~tid =
+      let dur = Time.diff (Time.now ()) start in
+      Event.complete
+        ~args:[ "id", Arg.int id; tid_arg tid ]
+        ~name:"gen-rules-dir-finish"
+        ~start
+        ~dur
+        Graph
+    ;;
+
+    let dune_file_start ~id ~dir ~source_dir ~start ~tid =
+      Event.instant
+        ~args:
+          [ "id", Arg.int id
+          ; tid_arg tid
+          ; "dir", Arg.build_path dir
+          ; "source_dir", Arg.source_path source_dir
+          ]
+        ~name:"gen-rules-dune-file-start"
+        start
+        Graph
+    ;;
+
+    let dune_file_finish ~id ~start ~tid =
+      let dur = Time.diff (Time.now ()) start in
+      Event.complete
+        ~args:[ "id", Arg.int id; tid_arg tid ]
+        ~name:"gen-rules-dune-file-finish"
+        ~start
+        ~dur
+        Graph
     ;;
   end
 end

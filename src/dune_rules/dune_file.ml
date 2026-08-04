@@ -431,11 +431,12 @@ module Eval = struct
       | _ :: _ ->
         Memo.lazy_
         @@ fun () ->
+        let dune_file = Path.Source.relative_fname eval.dir Source.Dune_file.fname in
+        Graph_trace.Dune_dyn.start ~path:dune_file
+        @@ fun () ->
         let+ stanzas =
           let origin =
-            Path.Build.append_source
-              (Context_name.build_dir context)
-              (Path.Source.relative_fname eval.dir Source.Dune_file.fname)
+            Path.Build.append_source (Context_name.build_dir context) dune_file
           in
           let include_context = Include_stanza.in_build_file origin in
           collect_dynamic_includes eval include_context origin dynamic_includes

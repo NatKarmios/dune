@@ -633,7 +633,10 @@ let gen_rules_regular_directory (sctx : Super_context.t Memo.t) ~src_dir ~compon
         | Generated | Is_component_of_a_group_but_not_the_root _ ->
           Memo.return Rules.empty |> make_rules |> Gen_rules.redirect_to_parent
         | Standalone (source_dir, _) | Group_root { source_dir; _ } ->
-          gen_rules_standalone_or_root sctx ~dir ~source_dir
+          (Graph_trace.Gen_rules.dune_file
+             ~dir
+             ~source_dir:(Source_tree.Dir.path source_dir)
+           @@ fun () -> gen_rules_standalone_or_root sctx ~dir ~source_dir)
           |> make_rules
           |> Gen_rules.rules_here
       in
@@ -779,6 +782,8 @@ let raise_on_lock_dir_out_of_sync =
 ;;
 
 let gen_rules ctx ~dir components =
+  Graph_trace.Gen_rules.dir ~dir
+  @@ fun () ->
   if Context_name.equal ctx Install.Context.install_context.name
   then (
     match components with
