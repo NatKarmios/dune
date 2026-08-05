@@ -41,6 +41,10 @@ module Event : sig
 
   type t
 
+  (** A fresh id for Chrome async events, unique across all such events so that
+      begin/end/instant events pair up correctly. *)
+  val gen_async_id : unit -> int
+
   val sandbox
     :  [ `Create | `Snapshot | `Destroy | `Extract | `Corrected ]
     -> start:Time.t
@@ -298,48 +302,43 @@ module Event : sig
         | Local_cache_hit
         | Shared_cache_hit
 
-      (* Each of these returns the event proper, preceded by an [intern-targets] /
-       [intern-deps] event for targets or dependencies seen for the first
-       time. Emit the whole list (e.g. with [emit_all]) so that ids are declared
-       before they are referenced. [tid] is the event's Chrome-trace lane. *)
+      (* The events are Chrome nestable-async events keyed by [async_id]:
+         [start] emits a begin, [finish] the matching end, and [deps] an async
+         instant marker on the same track. They also carry [rule_id] (the rule's
+         own identity, distinct from the async chain's id). [start] returns its
+         begin event preceded by an [intern-targets] event for targets seen for
+         the first time, and [deps] its marker preceded by an [intern-deps]
+         event; emit the whole list (e.g. with [emit_all]) so ids are declared
+         before referenced. *)
       val start
-        :  id:int
+        :  async_id:int
+        -> rule_id:int
         -> targets:targets
         -> forced_by:forced_by
         -> start:Time.t
-        -> tid:int
         -> t list
 
-      val finish
-        :  id:int
-        -> targets:targets
-        -> outcome:outcome
-        -> forced_by:forced_by
-        -> start:Time.t
-        -> tid:int
-        -> t list
-
-      val deps : id:int -> tid:int -> dyn:bool -> deps:Dyn.t list -> t list
+      val finish : async_id:int -> rule_id:int -> outcome:outcome -> t
+      val deps : async_id:int -> rule_id:int -> dyn:bool -> deps:Dyn.t list -> t list
     end
 
     module Dune_dyn : sig
-      val start : id:int -> start:Time.t -> tid:int -> t
-      val finish : id:int -> start:Time.t -> tid:int -> t
+      val start : async_id:int -> start:Time.t -> t
+      val finish : async_id:int -> t
     end
 
     module Gen_rules : sig
-      val dir_start : id:int -> dir:Path.Build.t -> start:Time.t -> tid:int -> t
-      val dir_finish : id:int -> start:Time.t -> tid:int -> t
+      val dir_start : async_id:int -> dir:Path.Build.t -> start:Time.t -> t
+      val dir_finish : async_id:int -> t
 
       val dune_file_start
-        :  id:int
+        :  async_id:int
         -> dir:Path.Build.t
         -> source_dir:Path.Source.t
         -> start:Time.t
-        -> tid:int
         -> t
 
-      val dune_file_finish : id:int -> start:Time.t -> tid:int -> t
+      val dune_file_finish : async_id:int -> t
     end
   end
 end

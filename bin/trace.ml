@@ -179,18 +179,44 @@ let times_of_sexp (sexp : Sexp.t) =
 
 let pid = lazy (Unix.getpid ())
 
-(* Graph events carry a "tid" arg (a lane, see [Dune_engine.Graph_trace]) so that
-   overlapping spans render on separate Chrome-trace threads. *)
-let tid_of_sexp rest =
-  List.find_map rest ~f:(function
-    | Sexp.List [ Atom "tid"; Atom t ] -> int_of_string_opt t
-    | _ -> None)
+(* Graph events are Chrome nestable-async events (see [Dune_engine.Graph_trace]):
+   they carry an "async_phase" arg ("begin"/"end"/"instant", rendered as ph
+   b/e/n) and an integer "async_id" pairing a begin with its end. Both are
+   removed from [rest] so they surface as top-level fields rather than in the
+   event's [args]. *)
+let async_phase_of_sexp rest =
+  let phase =
+    List.find_map rest ~f:(function
+      | Sexp.List [ Atom "async_phase"; Atom phase ] -> Some phase
+      | _ -> None)
+  in
+  let rest =
+    List.filter rest ~f:(function
+      | Sexp.List [ Atom "async_phase"; _ ] -> false
+      | _ -> true)
+  in
+  phase, rest
+;;
+
+let async_id_of_sexp rest =
+  let id =
+    List.find_map rest ~f:(function
+      | Sexp.List [ Atom "async_id"; Atom id ] -> int_of_string_opt id
+      | _ -> None)
+  in
+  let rest =
+    List.filter rest ~f:(function
+      | Sexp.List [ Atom "async_id"; _ ] -> false
+      | _ -> true)
+  in
+  id, rest
 ;;
 
 let json_of_event ~chrome (sexp : Sexp.t) =
   let cat, name, ts, rest, _ = base_of_sexp sexp in
   let ts, dur = times_of_sexp ts in
-  let tid = tid_of_sexp rest in
+  let async_phase, rest = async_phase_of_sexp rest in
+  let async_id, rest = async_id_of_sexp rest in
   let rest =
     List.map rest ~f:(function
       | Sexp.List [ Atom ("process_args" as k); List v ] ->
@@ -219,19 +245,36 @@ let json_of_event ~chrome (sexp : Sexp.t) =
       ]
   in
   match chrome with
-  | false -> Json.assoc base
+  | false ->
+    let async_fields =
+      (match async_phase with
+       | None -> []
+       | Some phase -> [ "async_phase", Json.string phase ])
+      @
+      match async_id with
+      | None -> []
+      | Some id -> [ "async_id", Json.int id ]
+    in
+    Json.assoc (base @ async_fields)
   | true ->
     let kind =
-      match dur with
-      | None -> "i"
-      | Some _ -> "X"
+      match async_phase, dur with
+      | Some "begin", _ -> "b"
+      | Some "end", _ -> "e"
+      | Some "instant", _ -> "n"
+      | Some _, _ | None, None -> "i"
+      | None, Some _ -> "X"
+    in
+    let id_field =
+      match async_phase, async_id with
+      | Some _, Some id -> [ "id", Json.int id ]
+      | _ -> []
     in
     Json.assoc
       (base
        @ [ "ph", Json.string kind ]
-       @ [ "pid", Json.int (Lazy.force pid)
-         ; "tid", Json.int (Option.value tid ~default:0)
-         ])
+       @ [ "pid", Json.int (Lazy.force pid); "tid", Json.int 0 ]
+       @ id_field)
 ;;
 
 let cat =

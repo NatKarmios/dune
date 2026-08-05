@@ -2,29 +2,6 @@ open Stdune
 open Dune_trace
 module Graph = Event.Graph
 
-module Lane = struct
-  (* A single global free-list allocator for Chrome-trace lanes (tids). Each
-     Graph scope holds a lane for its [start, finish] interval and releases it at
-     finish, so overlapping scopes get distinct lanes. Lanes are numbered from 1;
-     tid 0 stays reserved for all non-Graph events (which carry no [tid]). Safe
-     under dune's cooperative single-threaded fibers (alloc/release never yield). *)
-  let free = ref []
-  let next = ref 1
-
-  let alloc () =
-    match !free with
-    | l :: rest ->
-      free := rest;
-      l
-    | [] ->
-      let l = !next in
-      incr next;
-      l
-  ;;
-
-  let release l = free := l :: !free
-end
-
 type forced_by = Graph.forced_by =
   | Top_level
   | Rule of int
@@ -50,36 +27,27 @@ module Exec_rule = struct
   ;;
 
   module Emit = struct
-    let start ~(rule : Rule.t) ~forced_by ~start ~tid =
+    let start ~(rule : Rule.t) ~async_id ~rule_id ~forced_by ~start =
       Dune_trace.emit_all ~buffered:true Category.Graph
       @@ fun () ->
       Graph.Exec_rule.start
-        ~id:(Rule.Id.to_int rule.id)
+        ~async_id
+        ~rule_id
         ~targets:(conv_targets rule.targets)
         ~forced_by
         ~start
-        ~tid
     ;;
 
-    let deps ~(rule : Rule.t) ~tid ?(dyn = false) (deps : Dep.Set.t) =
+    let deps ~async_id ~rule_id ?(dyn = false) (deps : Dep.Set.t) =
       Dune_trace.emit_all ~buffered:true Category.Graph
       @@ fun () ->
       let deps = Dep.Set.to_list_map ~f:Dep.to_dyn deps in
-      Graph.Exec_rule.deps ~id:(Rule.Id.to_int rule.id) ~tid ~dyn ~deps
+      Graph.Exec_rule.deps ~async_id ~rule_id ~dyn ~deps
     ;;
 
-    (* Emits the finish event (which captures its stop time), then releases the
-       lane held since [start] so a later scope can reuse it. *)
-    let finish ~(rule : Rule.t) ~forced_by ~start ~tid outcome =
-      Dune_trace.emit_all ~buffered:true Category.Graph (fun () ->
-        Graph.Exec_rule.finish
-          ~id:(Rule.Id.to_int rule.id)
-          ~targets:(conv_targets rule.targets)
-          ~outcome
-          ~forced_by
-          ~start
-          ~tid);
-      Lane.release tid
+    let finish ~async_id ~rule_id outcome =
+      Dune_trace.emit ~buffered:true Category.Graph (fun () ->
+        Graph.Exec_rule.finish ~async_id ~rule_id ~outcome)
     ;;
   end
 
@@ -91,8 +59,8 @@ module Exec_rule = struct
 
     let empty = { deps = (fun ?dyn _ -> ignore dyn); finish = ignore }
 
-    let make ~(rule : Rule.t) ~forced_by ~start ~tid =
-      { deps = Emit.deps ~rule ~tid; finish = Emit.finish ~rule ~forced_by ~start ~tid }
+    let make ~async_id ~rule_id =
+      { deps = Emit.deps ~async_id ~rule_id; finish = Emit.finish ~async_id ~rule_id }
     ;;
   end
 
@@ -100,22 +68,19 @@ module Exec_rule = struct
     if enabled Category.Graph
     then (
       let start = Time.now () in
-      let tid = Lane.alloc () in
+      let async_id = Event.gen_async_id () in
+      let rule_id = Rule.Id.to_int rule.id in
       let open Fiber.O in
       (let* forcer = Fiber.Var.get forced_by in
-       Emit.start ~rule ~forced_by:forcer ~start ~tid;
-       let other_events = Other_events.make ~rule ~forced_by:forcer ~start ~tid in
-       let new_forcer = Rule (Rule.Id.to_int rule.id) in
-       Fiber.Var.set forced_by new_forcer (fun () -> Memo.run (f other_events)))
+       Emit.start ~rule ~async_id ~rule_id ~forced_by:forcer ~start;
+       let other_events = Other_events.make ~async_id ~rule_id in
+       Fiber.Var.set forced_by (Rule rule_id) (fun () -> Memo.run (f other_events)))
       |> Memo.of_reproducible_fiber)
     else f Other_events.empty
   ;;
 end
 
 module Dune_dyn = struct
-  (* Ids paired between the [dune-dyn-start] and [dune-dyn-finish] events. *)
-  let next_id = ref 0
-
   (* Wraps the reading and processing of the dune file at [path]. Emits a
      [dune-dyn-start] / [dune-dyn-finish] pair around [f] and sets [forced_by] to
      [Dune_dyn path] so that work done while processing the file is attributed to
@@ -123,19 +88,16 @@ module Dune_dyn = struct
   let start ~(path : Path.Source.t) (f : unit -> 'a Memo.t) : 'a Memo.t =
     if enabled Category.Graph
     then (
-      let id = !next_id in
-      incr next_id;
+      let async_id = Event.gen_async_id () in
       let start = Time.now () in
-      let tid = Lane.alloc () in
       Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-        Graph.Dune_dyn.start ~id ~start ~tid);
+        Graph.Dune_dyn.start ~async_id ~start);
       let open Fiber.O in
       (let+ result =
          Fiber.Var.set forced_by (Dune_dyn path) (fun () -> Memo.run (f ()))
        in
        Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-         Graph.Dune_dyn.finish ~id ~start ~tid);
-       Lane.release tid;
+         Graph.Dune_dyn.finish ~async_id);
        result)
       |> Memo.of_reproducible_fiber)
     else f ()
@@ -143,9 +105,6 @@ module Dune_dyn = struct
 end
 
 module Gen_rules = struct
-  (* Ids paired between the [gen-rules-*-start] and [gen-rules-*-finish] events. *)
-  let next_id = ref 0
-
   (* Wraps the generation of rules for [dir]. Emits a [gen-rules-dir-start] /
      [gen-rules-dir-finish] pair around [f] and sets [forced_by] to
      [Gen_rules { dir }] so that builds forced while generating the directory's
@@ -153,12 +112,10 @@ module Gen_rules = struct
   let dir ~(dir : Path.Build.t) (f : unit -> 'a Memo.t) : 'a Memo.t =
     if enabled Category.Graph
     then (
-      let id = !next_id in
-      incr next_id;
+      let async_id = Event.gen_async_id () in
       let start = Time.now () in
-      let tid = Lane.alloc () in
       Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-        Graph.Gen_rules.dir_start ~id ~dir ~start ~tid);
+        Graph.Gen_rules.dir_start ~async_id ~dir ~start);
       let open Fiber.O in
       (let+ result =
          Fiber.Var.set
@@ -167,8 +124,7 @@ module Gen_rules = struct
            (fun () -> Memo.run (f ()))
        in
        Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-         Graph.Gen_rules.dir_finish ~id ~start ~tid);
-       Lane.release tid;
+         Graph.Gen_rules.dir_finish ~async_id);
        result)
       |> Memo.of_reproducible_fiber)
     else f ()
@@ -184,12 +140,10 @@ module Gen_rules = struct
     =
     if enabled Category.Graph
     then (
-      let id = !next_id in
-      incr next_id;
+      let async_id = Event.gen_async_id () in
       let start = Time.now () in
-      let tid = Lane.alloc () in
       Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-        Graph.Gen_rules.dune_file_start ~id ~dir ~source_dir ~start ~tid);
+        Graph.Gen_rules.dune_file_start ~async_id ~dir ~source_dir ~start);
       let open Fiber.O in
       (let+ result =
          Fiber.Var.set
@@ -198,8 +152,7 @@ module Gen_rules = struct
            (fun () -> Memo.run (f ()))
        in
        Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-         Graph.Gen_rules.dune_file_finish ~id ~start ~tid);
-       Lane.release tid;
+         Graph.Gen_rules.dune_file_finish ~async_id);
        result)
       |> Memo.of_reproducible_fiber)
     else f ()

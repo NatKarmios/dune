@@ -73,7 +73,40 @@ module Event = struct
            ]
        @ record_args args)
   ;;
+
+  (* Chrome nestable-async events, keyed by an integer [id] and a [phase]
+     ("begin"/"end"/"instant", rendered as ph b/e/n). Begin/end sharing an id
+     form a span; an instant attaches a marker to that span's track. *)
+  let async_phase ?(args = []) ~async_id ~phase ~name ts cat : t =
+    List
+      (base ~name cat
+       @ [ Arg.time ts ]
+       @ Arg.record [ "async_id", Arg.int async_id; "async_phase", Arg.string phase ]
+       @ record_args args)
+  ;;
+
+  let async_begin ?args ~async_id ~name ts cat =
+    async_phase ?args ~async_id ~phase:"begin" ~name ts cat
+  ;;
+
+  let async_end ?args ~async_id ~name ts cat =
+    async_phase ?args ~async_id ~phase:"end" ~name ts cat
+  ;;
+
+  let async_instant ?args ~async_id ~name ts cat =
+    async_phase ?args ~async_id ~phase:"instant" ~name ts cat
+  ;;
 end
+
+(* Fresh ids for the Chrome async events above. A single counter across all such
+   events keeps ids unique, so begin/end/instant events never mis-pair. *)
+let async_next_id = ref 0
+
+let gen_async_id () =
+  let id = !async_next_id in
+  incr async_next_id;
+  id
+;;
 
 module Async = struct
   type data =
@@ -1112,8 +1145,6 @@ module Graph = struct
     "forced_by", Arg.list parts
   ;;
 
-  let tid_arg tid = "tid", Arg.int tid
-
   module Exec_rule = struct
     type outcome =
       | Executed
@@ -1126,32 +1157,24 @@ module Graph = struct
       | Shared_cache_hit -> "shared-cache-hit"
     ;;
 
-    let start ~id ~targets ~forced_by ~start ~tid =
+    let start ~async_id ~rule_id ~targets ~forced_by ~start =
       let intern_events, file_ids, dir_ids = intern_targets ~ts:start targets in
       let args =
-        ("id", Arg.int id)
-        :: tid_arg tid
+        ("rule_id", Arg.int rule_id)
         :: forced_by_arg forced_by
         :: target_args ~file_ids ~dir_ids
       in
-      intern_events @ [ Event.instant ~args ~name:"exec-rule-start" start Graph ]
+      intern_events @ [ Event.async_begin ~args ~async_id ~name:"exec-rule" start Graph ]
     ;;
 
-    let finish ~id ~targets ~outcome ~forced_by ~start ~tid =
-      let stop = Time.now () in
-      let intern_events, file_ids, dir_ids = intern_targets ~ts:stop targets in
-      let dur = Time.diff stop start in
+    let finish ~async_id ~rule_id ~outcome =
       let args =
-        ("id", Arg.int id)
-        :: tid_arg tid
-        :: ("outcome", Arg.string (outcome_to_string outcome))
-        :: forced_by_arg forced_by
-        :: target_args ~file_ids ~dir_ids
+        [ "rule_id", Arg.int rule_id; "outcome", Arg.string (outcome_to_string outcome) ]
       in
-      intern_events @ [ Event.complete ~args ~name:"exec-rule-finish" ~start ~dur Graph ]
+      Event.async_end ~args ~async_id ~name:"exec-rule" (Time.now ()) Graph
     ;;
 
-    let deps ~id ~tid ~dyn ~deps =
+    let deps ~async_id ~rule_id ~dyn ~deps =
       let ts = Time.now () in
       let new_entries = ref [] in
       let dep_ids =
@@ -1168,79 +1191,49 @@ module Graph = struct
         | entries -> [ intern_deps_event ~ts entries ]
       in
       let args =
-        [ "id", Arg.int id
-        ; tid_arg tid
+        [ "rule_id", Arg.int rule_id
         ; "dyn", Arg.bool dyn
         ; "deps", Arg.list (List.map dep_ids ~f:Arg.int)
         ]
       in
-      intern_events @ [ Event.instant ~args ~name:"exec-rule-deps" ts Graph ]
+      intern_events
+      @ [ Event.async_instant ~args ~async_id ~name:"exec-rule-deps" ts Graph ]
     ;;
   end
 
   module Dune_dyn = struct
-    let start ~id ~start ~tid =
-      Event.instant
-        ~args:[ "id", Arg.int id; tid_arg tid ]
-        ~name:"dune-dyn-start"
-        start
-        Graph
-    ;;
-
-    let finish ~id ~start ~tid =
-      let dur = Time.diff (Time.now ()) start in
-      Event.complete
-        ~args:[ "id", Arg.int id; tid_arg tid ]
-        ~name:"dune-dyn-finish"
-        ~start
-        ~dur
-        Graph
-    ;;
+    let start ~async_id ~start = Event.async_begin ~async_id ~name:"dune-dyn" start Graph
+    let finish ~async_id = Event.async_end ~async_id ~name:"dune-dyn" (Time.now ()) Graph
   end
 
   module Gen_rules = struct
     (* Span events for rule generation. [dir_*] attribute a directory (the
        outermost [gen_rules]); [dune_file_*] attribute a directory together with
        its dune file (the standalone/root case). *)
-    let dir_start ~id ~dir ~start ~tid =
-      Event.instant
-        ~args:[ "id", Arg.int id; tid_arg tid; "dir", Arg.build_path dir ]
-        ~name:"gen-rules-dir-start"
+    let dir_start ~async_id ~dir ~start =
+      Event.async_begin
+        ~args:[ "dir", Arg.build_path dir ]
+        ~async_id
+        ~name:"gen-rules-dir"
         start
         Graph
     ;;
 
-    let dir_finish ~id ~start ~tid =
-      let dur = Time.diff (Time.now ()) start in
-      Event.complete
-        ~args:[ "id", Arg.int id; tid_arg tid ]
-        ~name:"gen-rules-dir-finish"
-        ~start
-        ~dur
-        Graph
+    let dir_finish ~async_id =
+      Event.async_end ~async_id ~name:"gen-rules-dir" (Time.now ()) Graph
     ;;
 
-    let dune_file_start ~id ~dir ~source_dir ~start ~tid =
-      Event.instant
-        ~args:
-          [ "id", Arg.int id
-          ; tid_arg tid
-          ; "dir", Arg.build_path dir
-          ; "source_dir", Arg.source_path source_dir
-          ]
-        ~name:"gen-rules-dune-file-start"
+    let dune_file_start ~async_id ~dir ~source_dir ~start =
+      Event.async_begin
+        ~args:[ "dir", Arg.build_path dir; "source_dir", Arg.source_path source_dir ]
+        ~async_id
+        ~name:"gen-rules-dune-file"
         start
         Graph
     ;;
 
-    let dune_file_finish ~id ~start ~tid =
-      let dur = Time.diff (Time.now ()) start in
-      Event.complete
-        ~args:[ "id", Arg.int id; tid_arg tid ]
-        ~name:"gen-rules-dune-file-finish"
-        ~start
-        ~dur
-        Graph
+    let dune_file_finish ~async_id =
+      Event.async_end ~async_id ~name:"gen-rules-dune-file" (Time.now ()) Graph
     ;;
   end
 end
