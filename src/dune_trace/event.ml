@@ -76,32 +76,25 @@ module Event = struct
 
   (* Chrome nestable-async events, keyed by an integer [id] and a [phase]
      ("begin"/"end"/"instant", rendered as ph b/e/n). Begin/end sharing an id
-     form a span; an instant attaches a marker to that span's track. [flow_ids],
-     when non-empty, links this event to others via Perfetto flow arrows. *)
-  let async_phase ?(args = []) ?(flow_ids = []) ~async_id ~phase ~name ts cat : t =
-    let flow_args =
-      match flow_ids with
-      | [] -> []
-      | _ :: _ -> [ "flow_ids", Arg.list (List.map flow_ids ~f:Arg.int) ]
-    in
+     form a span; an instant attaches a marker to that span's track. *)
+  let async_phase ?(args = []) ~async_id ~phase ~name ts cat : t =
     List
       (base ~name cat
        @ [ Arg.time ts ]
-       @ Arg.record
-           ([ "async_id", Arg.int async_id; "async_phase", Arg.string phase ] @ flow_args)
+       @ Arg.record [ "async_id", Arg.int async_id; "async_phase", Arg.string phase ]
        @ record_args args)
   ;;
 
-  let async_begin ?args ?flow_ids ~async_id ~name ts cat =
-    async_phase ?args ?flow_ids ~async_id ~phase:"begin" ~name ts cat
+  let async_begin ?args ~async_id ~name ts cat =
+    async_phase ?args ~async_id ~phase:"begin" ~name ts cat
   ;;
 
-  let async_end ?args ?flow_ids ~async_id ~name ts cat =
-    async_phase ?args ?flow_ids ~async_id ~phase:"end" ~name ts cat
+  let async_end ?args ~async_id ~name ts cat =
+    async_phase ?args ~async_id ~phase:"end" ~name ts cat
   ;;
 
-  let async_instant ?args ?flow_ids ~async_id ~name ts cat =
-    async_phase ?args ?flow_ids ~async_id ~phase:"instant" ~name ts cat
+  let async_instant ?args ~async_id ~name ts cat =
+    async_phase ?args ~async_id ~phase:"instant" ~name ts cat
   ;;
 end
 
