@@ -1,0 +1,3 @@
+(library
+ (name dune_perfetto)
+ (synopsis "Emit Perfetto protobuf traces, compatible with ui.perfetto.dev"))

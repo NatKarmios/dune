@@ -415,6 +415,12 @@ let local_libraries =
     ; special_builtin_support = None
     ; root_module = None
     }
+  ; { path = "src/dune_perfetto"
+    ; main_module_name = Some "Dune_perfetto"
+    ; include_subdirs = No
+    ; special_builtin_support = None
+    ; root_module = None
+    }
   ; { path = "src/dune_rpc_impl"
     ; main_module_name = Some "Dune_rpc_impl"
     ; include_subdirs = No
@@ -455,6 +461,7 @@ let main =
             ; "Dune_engine"
             ; "Dune_findlib"
             ; "Dune_lang"
+            ; "Dune_perfetto"
             ; "Dune_pkg"
             ; "Dune_rpc"
             ; "Dune_rpc_impl"

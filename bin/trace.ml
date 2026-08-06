@@ -212,37 +212,11 @@ let async_id_of_sexp rest =
   id, rest
 ;;
 
-(* Graph events may carry a "flow_ids" arg (a list of integers) linking them via
-   Perfetto flow arrows. It is Perfetto-specific, so it is removed from [rest]
-   and dropped entirely from JSON output. *)
-let flow_ids_of_sexp rest =
-  let flow_ids =
-    match
-      List.find_map rest ~f:(function
-        | Sexp.List [ Atom "flow_ids"; List ids ] -> Some ids
-        | _ -> None)
-    with
-    | None -> []
-    | Some ids ->
-      List.filter_map ids ~f:(function
-        | Sexp.Atom s -> int_of_string_opt s
-        | _ -> None)
-  in
-  let rest =
-    List.filter rest ~f:(function
-      | Sexp.List [ Atom "flow_ids"; _ ] -> false
-      | _ -> true)
-  in
-  flow_ids, rest
-;;
-
 let json_of_event ~chrome (sexp : Sexp.t) =
   let cat, name, ts, rest, _ = base_of_sexp sexp in
   let ts, dur = times_of_sexp ts in
   let async_phase, rest = async_phase_of_sexp rest in
   let async_id, rest = async_id_of_sexp rest in
-  (* [flow_ids] is Perfetto-specific; drop it from JSON output. *)
-  let _flow_ids, rest = flow_ids_of_sexp rest in
   let rest =
     List.map rest ~f:(function
       | Sexp.List [ Atom ("process_args" as k); List v ] ->
@@ -301,6 +275,302 @@ let json_of_event ~chrome (sexp : Sexp.t) =
        @ [ "ph", Json.string kind ]
        @ [ "pid", Json.int (Lazy.force pid); "tid", Json.int 0 ]
        @ id_field)
+;;
+
+(* Perfetto native-protobuf export. Consumes the same csexp event stream as
+   [json_of_event], mapping each graph async span (matched by its "id") to a
+   Perfetto slice on its own track, flat complete/instant events to
+   slices/instants on a main thread track, and the intern tables to readable
+   target/dep names. *)
+module Perfetto_conv = struct
+  module P = Dune_perfetto
+
+  (* Track uuids: a single process track, one main thread track under it, and
+     one child track per async span id (offset past the two fixed uuids). *)
+  let process_uuid = 1
+  let main_thread_uuid = 2
+  let async_uuid id = id + 3
+
+  type t =
+    { mutable declared_process : bool
+    ; seen_async : (int, unit) Table.t
+    ; target_names : (int, string) Table.t
+    ; dep_names : (int, string) Table.t
+    ; mutable rev_packets : P.packet list
+    }
+
+  let create () =
+    { declared_process = false
+    ; seen_async = Table.create (module Int) 256
+    ; target_names = Table.create (module Int) 1024
+    ; dep_names = Table.create (module Int) 1024
+    ; rev_packets = []
+    }
+  ;;
+
+  let push t p = t.rev_packets <- p :: t.rev_packets
+
+  let field key rest =
+    List.find_map rest ~f:(function
+      | Sexp.List [ Atom k; v ] when String.equal k key -> Some v
+      | _ -> None)
+  ;;
+
+  let ensure_process t =
+    if not t.declared_process
+    then (
+      t.declared_process <- true;
+      push t (P.Track_descriptor (P.Track.process ~uuid:process_uuid ~pid:0 ~name:"dune"));
+      push
+        t
+        (P.Track_descriptor
+           (P.Track.thread
+              ~uuid:main_thread_uuid
+              ~parent_uuid:process_uuid
+              ~pid:0
+              ~tid:0
+              ~name:"main")))
+  ;;
+
+  (* Declare the track for async span [id] the first time it is seen, named by
+     the event's category (spans forced by another share the forcer's id, so a
+     single track may hold several event kinds; the category is their common
+     label). *)
+  let ensure_async_track t id ~name =
+    match Table.find t.seen_async id with
+    | Some () -> ()
+    | None ->
+      Table.set t.seen_async id ();
+      push
+        t
+        (P.Track_descriptor
+           (P.Track.child ~uuid:(async_uuid id) ~parent_uuid:process_uuid ~name))
+  ;;
+
+  (* Populate the intern tables from an [intern-targets] / [intern-deps] event.
+     These are not emitted as Perfetto events; they only resolve the id lists
+     carried by the [exec-rule-*] events into readable strings. *)
+  let record_interns t ~name rest =
+    let entry_field entry key =
+      match entry with
+      | Sexp.List fields -> field key fields
+      | _ -> None
+    in
+    let key, value_of_entry =
+      match name with
+      | "intern-targets" ->
+        ( "targets"
+        , fun entry ->
+            (match entry_field entry "path" with
+             | Some (Sexp.Atom path) -> Some path
+             | _ -> None) )
+      | _ ->
+        ( "deps"
+        , fun entry ->
+            (match entry_field entry "dep" with
+             | Some dep -> Some (Json.to_string (json_of_sexp dep))
+             | None -> None) )
+    in
+    let table =
+      if String.equal name "intern-targets" then t.target_names else t.dep_names
+    in
+    match field key rest with
+    | Some (List entries) ->
+      List.iter entries ~f:(fun entry ->
+        match entry_field entry "id", value_of_entry entry with
+        | Some (Atom id), Some value ->
+          (match int_of_string id with
+           | id -> Table.set table id value
+           | exception _ -> ())
+        | _ -> ())
+    | _ -> ()
+  ;;
+
+  (* Resolve a single interned id [s] to its readable value, falling back to the
+     id itself if it is not an integer or not in [table]. *)
+  let resolve_id table s =
+    match int_of_string s with
+    | id ->
+      (match Table.find table id with
+       | Some v -> v
+       | None -> s)
+    | exception _ -> s
+  ;;
+
+  let resolve_ids table ids =
+    List.filter_map ids ~f:(function
+      | Sexp.Atom s -> Some (P.Arg.string ~name:"" (resolve_id table s))
+      | _ -> None)
+  ;;
+
+  let forced_by_string = function
+    | Sexp.List parts ->
+      String.concat
+        ~sep:" "
+        (List.filter_map parts ~f:(function
+           | Sexp.Atom s -> Some s
+           | _ -> None))
+    | Sexp.Atom s -> s
+  ;;
+
+  let scalar_arg key = function
+    | Sexp.Atom s ->
+      if String.equal s "true"
+      then P.Arg.bool ~name:key true
+      else if String.equal s "false"
+      then P.Arg.bool ~name:key false
+      else (
+        match int_of_string s with
+        | i -> P.Arg.int ~name:key i
+        | exception _ ->
+          (match float_of_string s with
+           | f -> P.Arg.float ~name:key f
+           | exception _ -> P.Arg.string ~name:key s))
+    | v -> P.Arg.json ~name:key (Json.to_string (json_of_sexp v))
+  ;;
+
+  (* Convert an event's [rest] fields to debug annotations, dropping the
+     structural keys and resolving interned id lists to names. *)
+  let event_args t rest =
+    List.filter_map rest ~f:(function
+      | Sexp.List [ Atom key; v ] ->
+        (match key with
+         | "forced_by" -> Some (P.Arg.string ~name:key (forced_by_string v))
+         | "target_files" | "target_dirs" ->
+           (match v with
+            | List ids -> Some (P.Arg.array ~name:key (resolve_ids t.target_names ids))
+            | _ -> Some (scalar_arg key v))
+         | "deps" ->
+           (match v with
+            | List ids -> Some (P.Arg.array ~name:key (resolve_ids t.dep_names ids))
+            | _ -> Some (scalar_arg key v))
+         | "dep" ->
+           (match v with
+            | Atom s -> Some (P.Arg.string ~name:key (resolve_id t.dep_names s))
+            | _ -> Some (scalar_arg key v))
+         | "process_args" ->
+           (match v with
+            | List xs ->
+              Some
+                (P.Arg.array
+                   ~name:key
+                   (List.filter_map xs ~f:(function
+                      | Sexp.Atom s -> Some (P.Arg.string ~name:"" s)
+                      | _ -> None)))
+            | _ -> Some (scalar_arg key v))
+         | _ -> Some (scalar_arg key v))
+      | _ -> None)
+  ;;
+
+  let add t sexp =
+    let cat, name, ts_sexp, rest, _ = base_of_sexp sexp in
+    match name with
+    | "intern-targets" | "intern-deps" -> record_interns t ~name rest
+    | _ ->
+      let ts, dur = times_of_sexp ts_sexp in
+      let ts_ns = Time.to_ns ts in
+      ensure_process t;
+      let async_phase, rest = async_phase_of_sexp rest in
+      let async_id, rest = async_id_of_sexp rest in
+      let args = event_args t rest in
+      let open P.Event.Type in
+      (match async_phase, async_id with
+       | Some phase, Some id ->
+         let kind, ev_name =
+           match phase with
+           | "begin" -> Begin, Some name
+           | "end" -> End, None
+           | _ -> Instant, Some name
+         in
+         ensure_async_track t id ~name:cat;
+         push
+           t
+           (P.Track_event
+              (P.Event.create
+                 ?name:ev_name
+                 ~categories:[ cat ]
+                 ~args
+                 kind
+                 ~track_uuid:(async_uuid id)
+                 ~ts:ts_ns))
+       | _ ->
+         (match dur with
+          | Some dur ->
+            let stop = ts_ns + Time.Span.to_ns dur in
+            push
+              t
+              (P.Track_event
+                 (P.Event.create
+                    ~name
+                    ~categories:[ cat ]
+                    ~args
+                    Begin
+                    ~track_uuid:main_thread_uuid
+                    ~ts:ts_ns));
+            push
+              t
+              (P.Track_event (P.Event.create End ~track_uuid:main_thread_uuid ~ts:stop))
+          | None ->
+            push
+              t
+              (P.Track_event
+                 (P.Event.create
+                    ~name
+                    ~categories:[ cat ]
+                    ~args
+                    Instant
+                    ~track_uuid:main_thread_uuid
+                    ~ts:ts_ns))))
+  ;;
+
+  let to_packets t = List.rev t.rev_packets
+end
+
+let perfetto =
+  let info =
+    let doc = "Convert the trace file to Perfetto's protobuf format" in
+    Cmd.info "perfetto" ~doc
+  in
+  let term =
+    let+ debug_backtraces = debug_backtraces
+    and+ trace_file =
+      Arg.(
+        value
+        & opt (some string) None
+        & info [ "trace-file" ] ~docv:"FILE" ~doc:(Some "Read this trace file"))
+    and+ output =
+      Arg.(
+        value
+        & opt (some string) None
+        & info
+            [ "o"; "output" ]
+            ~docv:"FILE"
+            ~doc:(Some "Write to this file instead of stdout"))
+    and+ text =
+      Arg.(
+        value
+        & flag
+        & info
+            [ "text" ]
+            ~doc:(Some "Emit a human-readable text dump instead of binary protobuf"))
+    in
+    Common.No_build.set_debug_backtraces debug_backtraces;
+    let trace_file =
+      match trace_file with
+      | Some s -> s
+      | None -> Common.find_default_trace_file ()
+    in
+    let t = Perfetto_conv.create () in
+    iter_sexps trace_file ~f:(Perfetto_conv.add t);
+    let packets = Perfetto_conv.to_packets t in
+    let data =
+      if text then Dune_perfetto.to_text packets else Dune_perfetto.to_bytes packets
+    in
+    match output with
+    | Some file -> Io.String_path.write_file ~binary:true file data
+    | None -> print_string data
+  in
+  Cmd.v info term
 ;;
 
 let cat =
@@ -413,5 +683,5 @@ let group =
     let doc = "Commands to view dune's event trace" in
     Cmd.info "trace" ~doc
   in
-  Cmd.group info [ cat; commands ]
+  Cmd.group info [ cat; commands; perfetto ]
 ;;
