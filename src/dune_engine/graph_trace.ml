@@ -2,6 +2,47 @@ open Stdune
 open Dune_trace
 module Graph = Event.Graph
 
+(* A single glob predicate renders (via [Predicate_lang.Glob.to_dyn]) as nested
+   ["Glob"]/["Element"] wrappers around the pattern string; peel them to recover
+   the bare pattern (e.g. ["*.src"]). Anything else (unions, negations, ...) has
+   no single pattern, so fall back to the dyn rendering. *)
+let glob_predicate_string predicate =
+  let rec pattern : Dyn.t -> string option = function
+    | String s -> Some s
+    | Variant (("Glob" | "Element"), [ inner ]) -> pattern inner
+    | _ -> None
+  in
+  let dyn = Predicate_lang.Glob.to_dyn predicate in
+  match pattern dyn with
+  | Some s -> s
+  | None -> Dyn.to_string dyn
+;;
+
+(* Render a dependency to a readable string for the trace: a file to its path,
+   an alias to [dir@name], a file selector (glob) to [dir/<pattern>]. *)
+let dep_to_string (dep : Dep.t) =
+  match dep with
+  | Env var -> sprintf "env:%s" var
+  | File p -> Path.to_string p
+  | Alias a ->
+    sprintf
+      "%s@%s"
+      (Path.Build.to_string (Alias.dir a))
+      (Alias.Name.to_string (Alias.name a))
+  | File_selector fs ->
+    sprintf
+      "%s/%s"
+      (Path.to_string (File_selector.dir fs))
+      (glob_predicate_string (File_selector.predicate fs))
+  | Universe -> "universe"
+;;
+
+(* A rule's targets (files and directories), each rendered as its path string. *)
+let target_strings { Import.Targets.Validated.root; files; dirs } =
+  let path name = Path.Build.relative_fname root name |> Path.Build.to_string in
+  Filename.Set.to_list_map files ~f:path @ Filename.Set.to_list_map dirs ~f:path
+;;
+
 module Forced_by = struct
   type t' =
     | Forced_by_rule of Rule.Id.t
@@ -16,7 +57,7 @@ module Forced_by = struct
 
   let conv : t -> Graph.forced_by = function
     | Forced_by_rule id -> Forced_by_rule (Rule.Id.to_int id)
-    | Forced_by_dep dep -> Forced_by_dep (Dep.to_dyn dep)
+    | Forced_by_dep dep -> Forced_by_dep (dep_to_string dep)
     | Forced_by_dynamic_includes path -> Forced_by_dynamic_includes path
     | Forced_by_rule_gen { dir; source_dir } -> Forced_by_rule_gen { dir; source_dir }
   ;;
@@ -41,7 +82,7 @@ module Build_dep = struct
       Graph.Build_dep.start
         ~async_id
         ~forced_by:(Option.map forced_by ~f:Forced_by.conv)
-        ~dep:(Dep.to_dyn dep)
+        ~dep:(dep_to_string dep)
     ;;
 
     let finish ~async_id outcome =
@@ -88,7 +129,7 @@ module Build_dep = struct
           (facts
            |> List.map ~f:Dep.Set.of_keys
            |> Dep.Set.union_all
-           |> Dep.Set.to_list_map ~f:Dep.to_dyn))
+           |> Dep.Set.to_list_map ~f:dep_to_string))
       f
   ;;
 
@@ -98,7 +139,7 @@ module Build_dep = struct
       ~dep:(Dep.file_selector file_selector)
       ~outcome_of:(fun (files : Filename_set.t) ->
         Graph.Build_dep.Dep_expanded
-          (Filename_set.to_list files |> List.map ~f:(fun p -> Dep.to_dyn (Dep.file p))))
+          (Filename_set.to_list files |> List.map ~f:Path.to_string))
       f
   ;;
 end
@@ -109,10 +150,6 @@ module Exec_rule = struct
     | Local_cache_hit
     | Shared_cache_hit
 
-  let conv_targets { Import.Targets.Validated.root; files; dirs } =
-    { Dune_trace.Event.root; files; dirs }
-  ;;
-
   module Emit = struct
     let start ~rule:{ Rule.id; targets; _ } ~async_id ~forced_by ~start =
       Dune_trace.emit_all ~buffered:true Category.Graph
@@ -120,7 +157,7 @@ module Exec_rule = struct
       Graph.Exec_rule.start
         ~async_id
         ~rule_id:(Rule.Id.to_int id)
-        ~targets:(conv_targets targets)
+        ~targets:(target_strings targets)
         ~forced_by:(Option.map forced_by ~f:Forced_by.conv)
         ~start
     ;;
@@ -138,7 +175,7 @@ module Exec_rule = struct
     let deps_finish ~async_id ~rule_id (deps : Dep.Set.t) =
       Dune_trace.emit_all ~buffered:true Category.Graph
       @@ fun () ->
-      let deps = Dep.Set.to_list_map ~f:Dep.to_dyn deps in
+      let deps = Dep.Set.to_list_map ~f:dep_to_string deps in
       Graph.Exec_rule.deps_finish ~async_id ~rule_id ~deps
     ;;
 
@@ -150,7 +187,7 @@ module Exec_rule = struct
     let action_finish ~async_id ~rule_id (dyn_deps : Dep.Set.t list) =
       Dune_trace.emit_all ~buffered:true Category.Graph
       @@ fun () ->
-      let dyn_deps = List.map dyn_deps ~f:(Dep.Set.to_list_map ~f:Dep.to_dyn) in
+      let dyn_deps = List.map dyn_deps ~f:(Dep.Set.to_list_map ~f:dep_to_string) in
       Graph.Exec_rule.action_finish ~async_id ~rule_id ~dyn_deps
     ;;
   end

@@ -288,9 +288,12 @@ module Event : sig
   val artifact_substitution : file:Path.t -> placeholder:Dyn.t -> value:string -> t
 
   module Graph : sig
+    (* Targets and dependencies are rendered to strings by
+       [Dune_engine.Graph_trace] and interned together in a single table, so all
+       the [string]s and [string list]s below are values to be interned. *)
     type forced_by =
       | Forced_by_rule of int
-      | Forced_by_dep of Dyn.t
+      | Forced_by_dep of string
       | Forced_by_dynamic_includes of Path.Source.t
       | Forced_by_rule_gen of
           { dir : Path.Build.t
@@ -303,15 +306,15 @@ module Event : sig
           source file ([Dep_is_source]). *)
       type outcome =
         | Dep_rule of int
-        | Dep_expanded of Dyn.t list
+        | Dep_expanded of string list
         | Dep_is_source
 
       (** An async "build-dep" span for building a single dep, keyed by
           [async_id]: [start] emits the begin (carrying [dep]) and [finish] the
           matching end (carrying the [outcome]). Deps are interned, so each
-          returns its event preceded by an [intern-deps] event for deps seen for
-          the first time; emit the whole list (e.g. with [emit_all]). *)
-      val start : async_id:async_id -> forced_by:forced_by option -> dep:Dyn.t -> t list
+          returns its event preceded by an [intern] event for deps seen for the
+          first time; emit the whole list (e.g. with [emit_all]). *)
+      val start : async_id:async_id -> forced_by:forced_by option -> dep:string -> t list
 
       val finish : async_id:async_id -> outcome:outcome -> t list
     end
@@ -326,14 +329,13 @@ module Event : sig
          [start] emits a begin and [finish] the matching end, while the phase
          events below emit async-instant markers on the same track. They all
          also carry [rule_id] (the rule's own identity, distinct from the async
-         chain's id). [start] returns its begin event preceded by an
-         [intern-targets] event for targets seen for the first time; emit the
-         whole list (e.g. with [emit_all]) so ids are declared before
-         referenced. *)
+         chain's id). [start] returns its begin event preceded by an [intern]
+         event for targets seen for the first time; emit the whole list (e.g.
+         with [emit_all]) so ids are declared before referenced. *)
       val start
         :  async_id:async_id
         -> rule_id:int
-        -> targets:targets
+        -> targets:string list
         -> forced_by:forced_by option
         -> start:Time.t
         -> t list
@@ -344,16 +346,16 @@ module Event : sig
          dependency-resolution and action phases of its execution. [deps_finish]
          carries the resolved dependencies and [action_finish] the dynamic
          dependencies (one list per dynamic-dep node), both interned: they
-         return the marker preceded by an [intern-deps] event for deps seen for
-         the first time, so emit the whole list (e.g. with [emit_all]). *)
+         return the marker preceded by an [intern] event for deps seen for the
+         first time, so emit the whole list (e.g. with [emit_all]). *)
       val deps_start : async_id:async_id -> rule_id:int -> t
-      val deps_finish : async_id:async_id -> rule_id:int -> deps:Dyn.t list -> t list
+      val deps_finish : async_id:async_id -> rule_id:int -> deps:string list -> t list
       val action_start : async_id:async_id -> rule_id:int -> t
 
       val action_finish
         :  async_id:async_id
         -> rule_id:int
-        -> dyn_deps:Dyn.t list list
+        -> dyn_deps:string list list
         -> t list
     end
 

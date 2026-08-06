@@ -294,16 +294,16 @@ module Perfetto_conv = struct
   type t =
     { mutable declared_process : bool
     ; seen_async : (int, unit) Table.t
-    ; target_names : (int, string) Table.t
-    ; dep_names : (int, string) Table.t
+    ; (* Interned strings (targets and deps share one table, see the [intern]
+         event). Maps id -> readable value. *)
+      names : (int, string) Table.t
     ; mutable rev_packets : P.packet list
     }
 
   let create () =
     { declared_process = false
     ; seen_async = Table.create (module Int) 256
-    ; target_names = Table.create (module Int) 1024
-    ; dep_names = Table.create (module Int) 1024
+    ; names = Table.create (module Int) 2048
     ; rev_packets = []
     }
   ;;
@@ -347,40 +347,22 @@ module Perfetto_conv = struct
            (P.Track.child ~uuid:(async_uuid id) ~parent_uuid:process_uuid ~name))
   ;;
 
-  (* Populate the intern tables from an [intern-targets] / [intern-deps] event.
+  (* Populate the intern table from an [intern] event's [id -> value] entries.
      These are not emitted as Perfetto events; they only resolve the id lists
-     carried by the [exec-rule-*] events into readable strings. *)
-  let record_interns t ~name rest =
+     carried by the other graph events into readable strings. *)
+  let record_interns t rest =
     let entry_field entry key =
       match entry with
       | Sexp.List fields -> field key fields
       | _ -> None
     in
-    let key, value_of_entry =
-      match name with
-      | "intern-targets" ->
-        ( "targets"
-        , fun entry ->
-            (match entry_field entry "path" with
-             | Some (Sexp.Atom path) -> Some path
-             | _ -> None) )
-      | _ ->
-        ( "deps"
-        , fun entry ->
-            (match entry_field entry "dep" with
-             | Some dep -> Some (Json.to_string (json_of_sexp dep))
-             | None -> None) )
-    in
-    let table =
-      if String.equal name "intern-targets" then t.target_names else t.dep_names
-    in
-    match field key rest with
+    match field "entries" rest with
     | Some (List entries) ->
       List.iter entries ~f:(fun entry ->
-        match entry_field entry "id", value_of_entry entry with
-        | Some (Atom id), Some value ->
+        match entry_field entry "id", entry_field entry "value" with
+        | Some (Atom id), Some (Atom value) ->
           (match int_of_string id with
-           | id -> Table.set table id value
+           | id -> Table.set t.names id value
            | exception _ -> ())
         | _ -> ())
     | _ -> ()
@@ -436,17 +418,23 @@ module Perfetto_conv = struct
       | Sexp.List [ Atom key; v ] ->
         (match key with
          | "forced_by" -> Some (P.Arg.string ~name:key (forced_by_string v))
-         | "target_files" | "target_dirs" ->
+         | "targets" | "deps" ->
            (match v with
-            | List ids -> Some (P.Arg.array ~name:key (resolve_ids t.target_names ids))
-            | _ -> Some (scalar_arg key v))
-         | "deps" ->
-           (match v with
-            | List ids -> Some (P.Arg.array ~name:key (resolve_ids t.dep_names ids))
+            | List ids -> Some (P.Arg.array ~name:key (resolve_ids t.names ids))
             | _ -> Some (scalar_arg key v))
          | "dep" ->
            (match v with
-            | Atom s -> Some (P.Arg.string ~name:key (resolve_id t.dep_names s))
+            | Atom s -> Some (P.Arg.string ~name:key (resolve_id t.names s))
+            | _ -> Some (scalar_arg key v))
+         | "dyn_deps" ->
+           (match v with
+            | List stages ->
+              Some
+                (P.Arg.array
+                   ~name:key
+                   (List.map stages ~f:(function
+                      | Sexp.List ids -> P.Arg.array ~name:"" (resolve_ids t.names ids)
+                      | other -> scalar_arg "" other)))
             | _ -> Some (scalar_arg key v))
          | "process_args" ->
            (match v with
@@ -465,7 +453,7 @@ module Perfetto_conv = struct
   let add t sexp =
     let cat, name, ts_sexp, rest, _ = base_of_sexp sexp in
     match name with
-    | "intern-targets" | "intern-deps" -> record_interns t ~name rest
+    | "intern" -> record_interns t rest
     | _ ->
       let ts, dur = times_of_sexp ts_sexp in
       let ts_ns = Time.to_ns ts in

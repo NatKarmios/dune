@@ -1039,12 +1039,12 @@ let runtime_counter time name value =
 ;;
 
 module Graph = struct
-  (* A global intern table mapping a value (a target path or a dependency,
-     represented by a canonical string key) to a small integer id. The first
-     time a value is seen it is assigned a fresh id; the [exec_rule_*] functions
-     below emit an intern event recording that [id -> value] mapping and
-     thereafter refer to the value by its id alone. Ids are never reused, so the
-     mapping stays valid for the lifetime of the trace. *)
+  (* A single global intern table mapping a string (a target or a dependency,
+     both rendered to strings by [Dune_engine.Graph_trace]) to a small integer
+     id. The first time a string is seen it is assigned a fresh id; an [intern]
+     event records that [id -> value] mapping and thereafter events refer to it
+     by id alone. Ids are never reused, so the mapping stays valid for the
+     lifetime of the trace. *)
   module Intern = struct
     type t =
       { ids : int String.Table.t
@@ -1066,84 +1066,48 @@ module Graph = struct
     ;;
   end
 
-  let target_intern = Intern.create ()
-  let dep_intern = Intern.create ()
+  let intern = Intern.create ()
 
-  (* Private events recording targets / dependencies interned for the first
-     time. These are not part of the interface: they are only emitted by the
-     [exec_rule_*] functions, ahead of the event that first references the new
-     ids. A single event carries all the items newly interned by that call, as
-     a list of [id -> value] entries. *)
-  let intern_targets_event ~ts entries =
-    let targets =
-      List.map entries ~f:(fun (id, path) ->
-        Arg.record [ "id", Arg.int id; "path", Arg.string path ] |> Arg.list)
+  (* A private [intern] event recording the strings (targets or dependencies)
+     interned for the first time, each as an [id -> value] entry. Emitted ahead
+     of the event that first references the new ids. *)
+  let intern_event ~ts entries =
+    let entries =
+      List.map entries ~f:(fun (id, value) ->
+        Arg.record [ "id", Arg.int id; "value", Arg.string value ] |> Arg.list)
     in
-    Event.instant ~args:[ "targets", Arg.list targets ] ~name:"intern-targets" ts Graph
+    Event.instant ~args:[ "entries", Arg.list entries ] ~name:"intern" ts Graph
   ;;
 
-  let intern_deps_event ~ts entries =
-    let deps =
-      List.map entries ~f:(fun (id, dep) ->
-        Arg.record [ "id", Arg.int id; "dep", Arg.dyn dep ] |> Arg.list)
-    in
-    Event.instant ~args:[ "deps", Arg.list deps ] ~name:"intern-deps" ts Graph
-  ;;
-
-  (* Intern all of [targets], returning the intern events for the ones not seen
-     before along with the ids of the file and directory targets. *)
-  let intern_targets ~ts { root; files; dirs } =
+  (* Intern all of [strings], returning the intern events for the ones not seen
+     before along with their ids (in the same order as [strings]). *)
+  let intern_strings ~ts strings =
     let new_entries = ref [] in
-    let intern_path name =
-      let path = Path.Build.relative_fname root name |> Path.Build.to_string in
-      let id, freshness = Intern.intern target_intern path in
-      (match freshness with
-       | `New -> new_entries := (id, path) :: !new_entries
-       | `Existing -> ());
-      id
-    in
-    let file_ids = Filename.Set.to_list_map files ~f:intern_path in
-    let dir_ids = Filename.Set.to_list_map dirs ~f:intern_path in
-    let intern_events =
-      match List.rev !new_entries with
-      | [] -> []
-      | entries -> [ intern_targets_event ~ts entries ]
-    in
-    intern_events, file_ids, dir_ids
-  ;;
-
-  (* Intern all of [deps], returning the intern events for the ones not seen
-     before along with their ids (in the same order as [deps]). *)
-  let intern_deps ~ts deps =
-    let new_entries = ref [] in
-    let dep_ids =
-      List.map deps ~f:(fun (dep : Dyn.t) ->
-        let id, freshness = Intern.intern dep_intern (Dyn.to_string dep) in
+    let ids =
+      List.map strings ~f:(fun s ->
+        let id, freshness = Intern.intern intern s in
         (match freshness with
-         | `New -> new_entries := (id, dep) :: !new_entries
+         | `New -> new_entries := (id, s) :: !new_entries
          | `Existing -> ());
         id)
     in
     let intern_events =
       match List.rev !new_entries with
       | [] -> []
-      | entries -> [ intern_deps_event ~ts entries ]
+      | entries -> [ intern_event ~ts entries ]
     in
-    intern_events, dep_ids
+    intern_events, ids
   ;;
 
-  let target_args ~file_ids ~dir_ids =
-    List.filter_map
-      [ "target_files", file_ids; "target_dirs", dir_ids ]
-      ~f:(fun (k, ids) ->
-        match ids with
-        | [] -> None
-        | _ :: _ -> Some (k, Arg.list (List.map ids ~f:Arg.int)))
+  let ids_arg key ids =
+    match ids with
+    | [] -> []
+    | _ :: _ -> [ key, Arg.list (List.map ids ~f:Arg.int) ]
   ;;
 
   type forced_by =
     | Forced_by_rule of int
-    | Forced_by_dep of Dyn.t
+    | Forced_by_dep of string
     | Forced_by_dynamic_includes of Path.Source.t
     | Forced_by_rule_gen of
         { dir : Path.Build.t
@@ -1156,7 +1120,7 @@ module Graph = struct
       let parts =
         match forced_by with
         | Forced_by_rule id -> [ Arg.string "rule"; Arg.int id ]
-        | Forced_by_dep dep -> [ Arg.string "dep"; Arg.dyn dep ]
+        | Forced_by_dep dep -> [ Arg.string "dep"; Arg.string dep ]
         | Forced_by_dynamic_includes path ->
           [ Arg.string "dynamic-includes"; Arg.source_path path ]
         | Forced_by_rule_gen { dir; source_dir } ->
@@ -1176,17 +1140,17 @@ module Graph = struct
        source file ([Dep_is_source]). *)
     type outcome =
       | Dep_rule of int
-      | Dep_expanded of Dyn.t list
+      | Dep_expanded of string list
       | Dep_is_source
 
     (* Async span for building a single dep, keyed by [async_id]: [start] emits
        the begin (carrying the interned [dep]) and [finish] the matching end
        (carrying the [outcome]). Deps are interned, so each returns its event
-       preceded by an [intern-deps] event for deps seen for the first time; emit
-       the whole list (e.g. with [emit_all]). *)
+       preceded by an [intern] event for deps seen for the first time; emit the
+       whole list (e.g. with [emit_all]). *)
     let start ~async_id ~forced_by ~dep =
       let ts = Time.now () in
-      let intern_events, ids = intern_deps ~ts [ dep ] in
+      let intern_events, ids = intern_strings ~ts [ dep ] in
       let dep_arg =
         match ids with
         | [ id ] -> [ "dep", Arg.int id ]
@@ -1203,7 +1167,7 @@ module Graph = struct
         | Dep_expanded deps -> deps
         | Dep_rule _ | Dep_is_source -> []
       in
-      let intern_events, expanded_ids = intern_deps ~ts expanded in
+      let intern_events, expanded_ids = intern_strings ~ts expanded in
       let outcome_arg =
         match outcome with
         | Dep_rule rule_id -> Arg.list [ Arg.string "rule"; Arg.int rule_id ]
@@ -1229,10 +1193,10 @@ module Graph = struct
     ;;
 
     let start ~async_id ~rule_id ~targets ~forced_by ~start =
-      let intern_events, file_ids, dir_ids = intern_targets ~ts:start targets in
+      let intern_events, target_ids = intern_strings ~ts:start targets in
       let args =
         (("rule_id", Arg.int rule_id) :: forced_by_arg forced_by)
-        @ target_args ~file_ids ~dir_ids
+        @ ids_arg "targets" target_ids
       in
       intern_events @ [ Event.async_begin ~args ~async_id ~name:"exec-rule" start Graph ]
     ;;
@@ -1257,10 +1221,8 @@ module Graph = struct
 
     let deps_finish ~async_id ~rule_id ~deps =
       let ts = Time.now () in
-      let intern_events, dep_ids = intern_deps ~ts deps in
-      let args =
-        ("deps", Arg.list (List.map dep_ids ~f:Arg.int)) :: rule_id_args rule_id
-      in
+      let intern_events, dep_ids = intern_strings ~ts deps in
+      let args = ids_arg "deps" dep_ids @ rule_id_args rule_id in
       intern_events
       @ [ Event.async_instant ~args ~async_id ~name:"exec-rule-deps-finish" ts Graph ]
     ;;
@@ -1276,7 +1238,7 @@ module Graph = struct
 
     let action_finish ~async_id ~rule_id ~dyn_deps =
       let ts = Time.now () in
-      let per_list = List.map dyn_deps ~f:(intern_deps ~ts) in
+      let per_list = List.map dyn_deps ~f:(intern_strings ~ts) in
       let intern_events = List.concat_map per_list ~f:fst in
       let dyn_dep_ids = List.map per_list ~f:snd in
       let args =
