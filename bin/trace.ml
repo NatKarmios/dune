@@ -212,11 +212,37 @@ let async_id_of_sexp rest =
   id, rest
 ;;
 
+(* Graph events may carry a "flow_ids" arg (a list of integers) linking them via
+   Perfetto flow arrows. It is Perfetto-specific, so it is removed from [rest]
+   and dropped entirely from JSON output. *)
+let flow_ids_of_sexp rest =
+  let flow_ids =
+    match
+      List.find_map rest ~f:(function
+        | Sexp.List [ Atom "flow_ids"; List ids ] -> Some ids
+        | _ -> None)
+    with
+    | None -> []
+    | Some ids ->
+      List.filter_map ids ~f:(function
+        | Sexp.Atom s -> int_of_string_opt s
+        | _ -> None)
+  in
+  let rest =
+    List.filter rest ~f:(function
+      | Sexp.List [ Atom "flow_ids"; _ ] -> false
+      | _ -> true)
+  in
+  flow_ids, rest
+;;
+
 let json_of_event ~chrome (sexp : Sexp.t) =
   let cat, name, ts, rest, _ = base_of_sexp sexp in
   let ts, dur = times_of_sexp ts in
   let async_phase, rest = async_phase_of_sexp rest in
   let async_id, rest = async_id_of_sexp rest in
+  (* [flow_ids] is Perfetto-specific; drop it from JSON output. *)
+  let _flow_ids, rest = flow_ids_of_sexp rest in
   let rest =
     List.map rest ~f:(function
       | Sexp.List [ Atom ("process_args" as k); List v ] ->

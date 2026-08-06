@@ -546,8 +546,9 @@ module Internal = struct
        function [(Build_config.get ()).execution_parameters] is likely
        memoized, and the result is not expected to change often, so we do not
        sacrifice too much performance here by executing it sequentially. *)
+    graph_trace.deps_start ();
     let* action, facts = Action_builder.evaluate_and_collect_facts action in
-    graph_trace.deps (Dep.Set.of_keys facts);
+    graph_trace.deps_finish (Dep.Set.of_keys facts);
     let wrap_fiber f =
       Memo.of_reproducible_fiber
         (if Loc.is_none loc
@@ -671,6 +672,7 @@ module Internal = struct
               let outcome = Graph_trace.Exec_rule.Shared_cache_hit in
               Fiber.return (produced_targets, dynamic_deps_stages, outcome)
             | None ->
+              graph_trace.action_start ();
               (* Step IV. Execute the build action. *)
               let* exec_result =
                 execute_action_for_rule
@@ -700,12 +702,12 @@ module Internal = struct
                 List.map
                   exec_result.action_exec_result.dynamic_deps_stages
                   ~f:(fun (deps, fact_map) ->
-                    graph_trace.deps ~dyn:true deps;
                     ( deps
                     , let d = Digest.Manual.create () in
                       Dep.Facts.digest fact_map d ~env:action.env;
                       Digest.Manual.get d ))
               in
+              graph_trace.action_finish (List.map dynamic_deps_stages ~f:fst);
               let outcome = Graph_trace.Exec_rule.Executed in
               Fiber.return (produced_targets, dynamic_deps_stages, outcome)
           in

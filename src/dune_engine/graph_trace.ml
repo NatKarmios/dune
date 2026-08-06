@@ -12,8 +12,8 @@ type forced_by = Graph.forced_by =
       }
 
 (* The forcer of the current dynamic context. Each scope sets it while running
-   its body; [Exec_rule] reads it and records it on the rule's events so the
-   trace shows what forced each rule. *)
+   its body; [Exec_rule] reads it and records the forcer on the rule's events so
+   the trace shows what forced each rule. *)
 let forced_by = Fiber.Var.create Top_level
 
 module Exec_rule = struct
@@ -38,29 +38,61 @@ module Exec_rule = struct
         ~start
     ;;
 
-    let deps ~async_id ~rule_id ?(dyn = false) (deps : Dep.Set.t) =
-      Dune_trace.emit_all ~buffered:true Category.Graph
-      @@ fun () ->
-      let deps = Dep.Set.to_list_map ~f:Dep.to_dyn deps in
-      Graph.Exec_rule.deps ~async_id ~rule_id ~dyn ~deps
-    ;;
-
     let finish ~async_id ~rule_id outcome =
       Dune_trace.emit ~buffered:true Category.Graph (fun () ->
         Graph.Exec_rule.finish ~async_id ~rule_id ~outcome)
+    ;;
+
+    let deps_start ~async_id ~rule_id () =
+      Dune_trace.emit ~buffered:true Category.Graph (fun () ->
+        Graph.Exec_rule.deps_start ~async_id ~rule_id)
+    ;;
+
+    let deps_finish ~async_id ~rule_id (deps : Dep.Set.t) =
+      Dune_trace.emit_all ~buffered:true Category.Graph
+      @@ fun () ->
+      let deps = Dep.Set.to_list_map ~f:Dep.to_dyn deps in
+      Graph.Exec_rule.deps_finish ~async_id ~rule_id ~deps
+    ;;
+
+    let action_start ~async_id ~rule_id () =
+      Dune_trace.emit ~buffered:true Category.Graph (fun () ->
+        Graph.Exec_rule.action_start ~async_id ~rule_id)
+    ;;
+
+    let action_finish ~async_id ~rule_id (dyn_deps : Dep.Set.t list) =
+      Dune_trace.emit_all ~buffered:true Category.Graph
+      @@ fun () ->
+      let dyn_deps = List.map dyn_deps ~f:(Dep.Set.to_list_map ~f:Dep.to_dyn) in
+      Graph.Exec_rule.action_finish ~async_id ~rule_id ~dyn_deps
     ;;
   end
 
   module Other_events = struct
     type t =
-      { deps : ?dyn:bool -> Dep.Set.t -> unit
+      { deps_start : unit -> unit
+      ; deps_finish : Dep.Set.t -> unit
+      ; action_start : unit -> unit
+      ; action_finish : Dep.Set.t list -> unit
       ; finish : outcome -> unit
       }
 
-    let empty = { deps = (fun ?dyn _ -> ignore dyn); finish = ignore }
+    let empty =
+      { deps_start = ignore
+      ; deps_finish = ignore
+      ; action_start = ignore
+      ; action_finish = ignore
+      ; finish = ignore
+      }
+    ;;
 
     let make ~async_id ~rule_id =
-      { deps = Emit.deps ~async_id ~rule_id; finish = Emit.finish ~async_id ~rule_id }
+      { deps_start = Emit.deps_start ~async_id ~rule_id
+      ; deps_finish = Emit.deps_finish ~async_id ~rule_id
+      ; action_start = Emit.action_start ~async_id ~rule_id
+      ; action_finish = Emit.action_finish ~async_id ~rule_id
+      ; finish = Emit.finish ~async_id ~rule_id
+      }
     ;;
   end
 

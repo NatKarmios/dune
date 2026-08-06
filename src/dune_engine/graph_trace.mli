@@ -10,7 +10,10 @@ module Exec_rule : sig
 
   module Other_events : sig
     type t =
-      { deps : ?dyn:bool -> Dep.Set.t -> unit
+      { deps_start : unit -> unit
+      ; deps_finish : Dep.Set.t -> unit
+      ; action_start : unit -> unit
+      ; action_finish : Dep.Set.t list -> unit
       ; finish : outcome -> unit
       }
   end

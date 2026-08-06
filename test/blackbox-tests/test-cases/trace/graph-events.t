@@ -1,9 +1,15 @@
 Dune emits graph events around rule execution as a Chrome async span keyed by a
 generated id: an "exec-rule" async begin (carrying the rule's targets) and a
 matching "exec-rule" async end (carrying the execution outcome) bracket each
-execution, and an "exec-rule-deps" async-instant event lists the rule's
-dependencies. All three share the span's "async_id"; the begin and end are told
-apart by their "async_phase".
+execution. Both share the span's "async_id" and are told apart by their
+"async_phase".
+
+Within that span, async-instant events (sharing the same "async_id", and also
+carrying the "rule_id") mark the two phases of execution: "exec-rule-deps-start"
+/ "exec-rule-deps-finish" around dependency resolution (the finish carrying the
+resolved "deps"), and "exec-rule-action-start" / "exec-rule-action-finish"
+around running the action (the finish carrying the "dyn_deps", one dep list per
+dynamic-deps stage).
 
 Targets and dependencies are interned to integer ids: the first time some are
 seen an "intern-targets" / "intern-deps" event records their id -> value
@@ -33,20 +39,26 @@ generation for a directory and its dune file):
 
   $ dune trace cat | jq -r 'select(.cat == "graph") | .name' | sort -u
   exec-rule
-  exec-rule-deps
+  exec-rule-action-finish
+  exec-rule-action-start
+  exec-rule-deps-finish
+  exec-rule-deps-start
   gen-rules-dir
   gen-rules-dune-file
   intern-deps
   intern-targets
 
-Every rule id emits exactly a begin, a deps and an end event (they share the
-async id); the begin and end both use the "exec-rule" name:
+Every exec-rule event shares its rule's async id: the "exec-rule" begin/end
+bracket the async-instant phase markers (deps-start/finish, and action-start/
+finish for rules that run an action). Each async id has exactly one begin and
+one end:
 
   $ dune trace cat | jq -sr '
   >   [ .[] | select(.cat == "graph" and (.name | startswith("exec-"))) ]
   >   | group_by(.async_id)
-  >   | map(map(.async_phase) | sort)
-  >   | all(. == ["begin", "end", "instant"])
+  >   | map(([ .[] | select(.async_phase == "begin") ] | length) == 1
+  >         and ([ .[] | select(.async_phase == "end") ] | length) == 1)
+  >   | all
   > '
   true
 
@@ -101,7 +113,7 @@ entry, not expanded into the files it matches:
   >   | ([ .[] | select(.name == "exec-rule" and .async_phase == "begin")
   >        | select([ (.args.target_files // [])[] | $targets[tostring] ] | any(endswith("out.txt")))
   >        | .async_id ][0]) as $rule
-  >   | [ .[] | select(.name == "exec-rule-deps" and .async_id == $rule)
+  >   | [ .[] | select(.name == "exec-rule-deps-finish" and .async_id == $rule)
   >       | .args.deps[] | $deps[tostring] ]
   > '
   [["File",["In_build_dir","default/dep.txt"]],["Alias",{"dir":"default","name":"my-alias"}],["File_selector",{"dir":["In_build_dir","default"],"predicate":["Element",["Glob","*.src"]],"only_generated_files":false}]]

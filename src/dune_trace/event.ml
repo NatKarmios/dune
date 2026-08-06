@@ -76,25 +76,32 @@ module Event = struct
 
   (* Chrome nestable-async events, keyed by an integer [id] and a [phase]
      ("begin"/"end"/"instant", rendered as ph b/e/n). Begin/end sharing an id
-     form a span; an instant attaches a marker to that span's track. *)
-  let async_phase ?(args = []) ~async_id ~phase ~name ts cat : t =
+     form a span; an instant attaches a marker to that span's track. [flow_ids],
+     when non-empty, links this event to others via Perfetto flow arrows. *)
+  let async_phase ?(args = []) ?(flow_ids = []) ~async_id ~phase ~name ts cat : t =
+    let flow_args =
+      match flow_ids with
+      | [] -> []
+      | _ :: _ -> [ "flow_ids", Arg.list (List.map flow_ids ~f:Arg.int) ]
+    in
     List
       (base ~name cat
        @ [ Arg.time ts ]
-       @ Arg.record [ "async_id", Arg.int async_id; "async_phase", Arg.string phase ]
+       @ Arg.record
+           ([ "async_id", Arg.int async_id; "async_phase", Arg.string phase ] @ flow_args)
        @ record_args args)
   ;;
 
-  let async_begin ?args ~async_id ~name ts cat =
-    async_phase ?args ~async_id ~phase:"begin" ~name ts cat
+  let async_begin ?args ?flow_ids ~async_id ~name ts cat =
+    async_phase ?args ?flow_ids ~async_id ~phase:"begin" ~name ts cat
   ;;
 
-  let async_end ?args ~async_id ~name ts cat =
-    async_phase ?args ~async_id ~phase:"end" ~name ts cat
+  let async_end ?args ?flow_ids ~async_id ~name ts cat =
+    async_phase ?args ?flow_ids ~async_id ~phase:"end" ~name ts cat
   ;;
 
-  let async_instant ?args ~async_id ~name ts cat =
-    async_phase ?args ~async_id ~phase:"instant" ~name ts cat
+  let async_instant ?args ?flow_ids ~async_id ~name ts cat =
+    async_phase ?args ?flow_ids ~async_id ~phase:"instant" ~name ts cat
   ;;
 end
 
@@ -1110,6 +1117,26 @@ module Graph = struct
     intern_events, file_ids, dir_ids
   ;;
 
+  (* Intern all of [deps], returning the intern events for the ones not seen
+     before along with their ids (in the same order as [deps]). *)
+  let intern_deps ~ts deps =
+    let new_entries = ref [] in
+    let dep_ids =
+      List.map deps ~f:(fun (dep : Dyn.t) ->
+        let id, freshness = Intern.intern dep_intern (Dyn.to_string dep) in
+        (match freshness with
+         | `New -> new_entries := (id, dep) :: !new_entries
+         | `Existing -> ());
+        id)
+    in
+    let intern_events =
+      match List.rev !new_entries with
+      | [] -> []
+      | entries -> [ intern_deps_event ~ts entries ]
+    in
+    intern_events, dep_ids
+  ;;
+
   let target_args ~file_ids ~dir_ids =
     List.filter_map
       [ "target_files", file_ids; "target_dirs", dir_ids ]
@@ -1174,30 +1201,49 @@ module Graph = struct
       Event.async_end ~args ~async_id ~name:"exec-rule" (Time.now ()) Graph
     ;;
 
-    let deps ~async_id ~rule_id ~dyn ~deps =
+    let rule_id_args rule_id = [ "rule_id", Arg.int rule_id ]
+
+    let deps_start ~async_id ~rule_id =
+      Event.async_instant
+        ~args:(rule_id_args rule_id)
+        ~async_id
+        ~name:"exec-rule-deps-start"
+        (Time.now ())
+        Graph
+    ;;
+
+    let deps_finish ~async_id ~rule_id ~deps =
       let ts = Time.now () in
-      let new_entries = ref [] in
-      let dep_ids =
-        List.map deps ~f:(fun (dep : Dyn.t) ->
-          let dep_id, freshness = Intern.intern dep_intern (Dyn.to_string dep) in
-          (match freshness with
-           | `New -> new_entries := (dep_id, dep) :: !new_entries
-           | `Existing -> ());
-          dep_id)
-      in
-      let intern_events =
-        match List.rev !new_entries with
-        | [] -> []
-        | entries -> [ intern_deps_event ~ts entries ]
-      in
+      let intern_events, dep_ids = intern_deps ~ts deps in
       let args =
-        [ "rule_id", Arg.int rule_id
-        ; "dyn", Arg.bool dyn
-        ; "deps", Arg.list (List.map dep_ids ~f:Arg.int)
-        ]
+        ("deps", Arg.list (List.map dep_ids ~f:Arg.int)) :: rule_id_args rule_id
       in
       intern_events
-      @ [ Event.async_instant ~args ~async_id ~name:"exec-rule-deps" ts Graph ]
+      @ [ Event.async_instant ~args ~async_id ~name:"exec-rule-deps-finish" ts Graph ]
+    ;;
+
+    let action_start ~async_id ~rule_id =
+      Event.async_instant
+        ~args:(rule_id_args rule_id)
+        ~async_id
+        ~name:"exec-rule-action-start"
+        (Time.now ())
+        Graph
+    ;;
+
+    let action_finish ~async_id ~rule_id ~dyn_deps =
+      let ts = Time.now () in
+      let per_list = List.map dyn_deps ~f:(intern_deps ~ts) in
+      let intern_events = List.concat_map per_list ~f:fst in
+      let dyn_dep_ids = List.map per_list ~f:snd in
+      let args =
+        ( "dyn_deps"
+        , Arg.list
+            (List.map dyn_dep_ids ~f:(fun ids -> Arg.list (List.map ids ~f:Arg.int))) )
+        :: rule_id_args rule_id
+      in
+      intern_events
+      @ [ Event.async_instant ~args ~async_id ~name:"exec-rule-action-finish" ts Graph ]
     ;;
   end
 
