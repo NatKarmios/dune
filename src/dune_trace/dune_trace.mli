@@ -40,10 +40,11 @@ module Event : sig
   end
 
   type t
+  type async_id
 
   (** A fresh id for Chrome async events, unique across all such events so that
       begin/end/instant events pair up correctly. *)
-  val gen_async_id : unit -> int
+  val gen_async_id : unit -> async_id
 
   val sandbox
     :  [ `Create | `Snapshot | `Destroy | `Extract | `Corrected ]
@@ -288,13 +289,32 @@ module Event : sig
 
   module Graph : sig
     type forced_by =
-      | Top_level
-      | Rule of int
-      | Dune_dyn of Path.Source.t
-      | Gen_rules of
+      | Forced_by_rule of int
+      | Forced_by_dep of Dyn.t
+      | Forced_by_dynamic_includes of Path.Source.t
+      | Forced_by_rule_gen of
           { dir : Path.Build.t
           ; source_dir : Path.Source.t option
           }
+
+    module Build_dep : sig
+      (** How building a dep resolved: it belonged to a [Dep_rule] (by id), it
+          [Dep_expanded] to concrete deps (e.g. an alias or glob), or it was a
+          source file ([Dep_is_source]). *)
+      type outcome =
+        | Dep_rule of int
+        | Dep_expanded of Dyn.t list
+        | Dep_is_source
+
+      (** An async "build-dep" span for building a single dep, keyed by
+          [async_id]: [start] emits the begin (carrying [dep]) and [finish] the
+          matching end (carrying the [outcome]). Deps are interned, so each
+          returns its event preceded by an [intern-deps] event for deps seen for
+          the first time; emit the whole list (e.g. with [emit_all]). *)
+      val start : async_id:async_id -> forced_by:forced_by option -> dep:Dyn.t -> t list
+
+      val finish : async_id:async_id -> outcome:outcome -> t list
+    end
 
     module Exec_rule : sig
       type outcome =
@@ -311,14 +331,14 @@ module Event : sig
          whole list (e.g. with [emit_all]) so ids are declared before
          referenced. *)
       val start
-        :  async_id:int
+        :  async_id:async_id
         -> rule_id:int
         -> targets:targets
-        -> forced_by:forced_by
+        -> forced_by:forced_by option
         -> start:Time.t
         -> t list
 
-      val finish : async_id:int -> rule_id:int -> outcome:outcome -> t
+      val finish : async_id:async_id -> rule_id:int -> outcome:outcome -> t
 
       (* Async-instant markers on the rule's span bracketing the
          dependency-resolution and action phases of its execution. [deps_finish]
@@ -326,34 +346,34 @@ module Event : sig
          dependencies (one list per dynamic-dep node), both interned: they
          return the marker preceded by an [intern-deps] event for deps seen for
          the first time, so emit the whole list (e.g. with [emit_all]). *)
-      val deps_start : async_id:int -> rule_id:int -> t
-      val deps_finish : async_id:int -> rule_id:int -> deps:Dyn.t list -> t list
-      val action_start : async_id:int -> rule_id:int -> t
+      val deps_start : async_id:async_id -> rule_id:int -> t
+      val deps_finish : async_id:async_id -> rule_id:int -> deps:Dyn.t list -> t list
+      val action_start : async_id:async_id -> rule_id:int -> t
 
       val action_finish
-        :  async_id:int
+        :  async_id:async_id
         -> rule_id:int
         -> dyn_deps:Dyn.t list list
         -> t list
     end
 
     module Dune_dyn : sig
-      val start : async_id:int -> start:Time.t -> t
-      val finish : async_id:int -> t
+      val start : async_id:async_id -> start:Time.t -> t
+      val finish : async_id:async_id -> t
     end
 
     module Gen_rules : sig
-      val dir_start : async_id:int -> dir:Path.Build.t -> start:Time.t -> t
-      val dir_finish : async_id:int -> t
+      val dir_start : async_id:async_id -> dir:Path.Build.t -> start:Time.t -> t
+      val dir_finish : async_id:async_id -> t
 
       val dune_file_start
-        :  async_id:int
+        :  async_id:async_id
         -> dir:Path.Build.t
         -> source_dir:Path.Source.t
         -> start:Time.t
         -> t
 
-      val dune_file_finish : async_id:int -> t
+      val dune_file_finish : async_id:async_id -> t
     end
   end
 end

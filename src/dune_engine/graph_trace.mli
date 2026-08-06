@@ -40,3 +40,23 @@ module Gen_rules : sig
     -> (unit -> 'a Memo.t)
     -> 'a Memo.t
 end
+
+module Build_dep : sig
+  (** Trace building a single dependency as an async span, recording it as the
+      [forced_by] context while [f] runs. Each function starts the span for the
+      relevant dep and passes [f] a callback to emit the finish once the dep's
+      outcome is known. *)
+
+  (** A file dep: the callback takes the rule that produces the file, or [None]
+      if it is a source file. *)
+  val file : Path.t -> ((Rule.t option -> unit) -> 'a Memo.t) -> 'a Memo.t
+
+  (** An alias dep: the callback takes the facts the alias expanded to. *)
+  val alias : Alias.t -> ((Dep.Facts.t list -> unit) -> 'a Memo.t) -> 'a Memo.t
+
+  (** A file-selector (glob) dep: the callback takes the files it matched. *)
+  val file_selector
+    :  File_selector.t
+    -> ((Filename_set.t -> unit) -> 'a Memo.t)
+    -> 'a Memo.t
+end

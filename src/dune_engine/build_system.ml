@@ -384,10 +384,13 @@ module Internal = struct
     Memo.exec (Lazy.force build_file_selector_memo) file_selector
 
   and build_file_selector_impl file_selector =
+    Graph_trace.Build_dep.file_selector file_selector
+    @@ fun trace_finish ->
     let* files = eval_pred file_selector in
     let+ fact = Dep.Fact.Files.create files ~build_file in
     (* Fact: [file_selector] expands to the set of [files] whose digests are captured
        via [build_file]; also, the [File_selector.dir] exists (though it may be empty) *)
+    trace_finish files;
     Dep.Fact.file_selector file_selector fact
 
   (* [build_dep] turns a [Dep.t] which is a description of a dependency into a
@@ -874,9 +877,13 @@ module Internal = struct
                Digest.Feed.string hasher (Path.Local.to_string path)))
         contents
     in
+    Graph_trace.Build_dep.file path
+    @@ fun trace_finish ->
     Load_rules.get_rule_or_source path
     >>= function
-    | Source digest -> Memo.return (digest, File_target)
+    | Source digest ->
+      trace_finish None;
+      Memo.return (digest, File_target)
     | Rule (path, rule) ->
       let* { facts = _; targets } =
         Memo.push_stack_frame
@@ -884,45 +891,49 @@ module Internal = struct
           ~human_readable_description:(fun () ->
             Pp.text (Path.to_string_maybe_quoted (Path.build path)))
       in
-      (match Targets.Produced.find_any targets path with
-       | Some (Left digest) -> Memo.return (digest, File_target)
-       | Some (Right contents) ->
-         let digest = directory_digest contents in
-         Memo.return (digest, Dir_target { targets })
-       | None ->
-         (* CR-someday amokhov: The most important reason we end up here is
+      let+ result =
+        match Targets.Produced.find_any targets path with
+        | Some (Left digest) -> Memo.return (digest, File_target)
+        | Some (Right contents) ->
+          let digest = directory_digest contents in
+          Memo.return (digest, Dir_target { targets })
+        | None ->
+          (* CR-someday amokhov: The most important reason we end up here is
           [No_such_file]. I think some of the outcomes above are impossible
           but some others will benefit from a better error. To be refined. *)
-         let target =
-           Path.Build.drop_build_context_exn path |> Path.Source.to_string_maybe_quoted
-         in
-         let matching_dirs =
-           Filename.Set.to_list_map rule.targets.dirs ~f:(fun dir ->
-             (* CR-someday rleshchinskiy: This test can probably be simplified. *)
-             let dir = Path.Build.relative_fname rule.targets.root dir in
-             match Path.Build.is_descendant path ~of_:dir with
-             | true -> [ dir ]
-             | false -> [])
-           |> List.concat
-         in
-         let matching_target =
-           match matching_dirs with
-           | [ dir ] ->
-             Path.Build.drop_build_context_exn dir |> Path.Source.to_string_maybe_quoted
-           | [] | _ :: _ ->
-             Code_error.raise
-               "Multiple matching directory targets"
-               [ "targets", Targets.Validated.to_dyn rule.targets ]
-         in
-         User_error.raise
-           ~loc:rule.loc
-           ~needs_stack_trace:true
-           [ Pp.textf
-               "This rule defines a directory target %S that matches the requested path \
-                %S but the rule's action didn't produce it"
-               matching_target
-               target
-           ])
+          let target =
+            Path.Build.drop_build_context_exn path |> Path.Source.to_string_maybe_quoted
+          in
+          let matching_dirs =
+            Filename.Set.to_list_map rule.targets.dirs ~f:(fun dir ->
+              (* CR-someday rleshchinskiy: This test can probably be simplified. *)
+              let dir = Path.Build.relative_fname rule.targets.root dir in
+              match Path.Build.is_descendant path ~of_:dir with
+              | true -> [ dir ]
+              | false -> [])
+            |> List.concat
+          in
+          let matching_target =
+            match matching_dirs with
+            | [ dir ] ->
+              Path.Build.drop_build_context_exn dir |> Path.Source.to_string_maybe_quoted
+            | [] | _ :: _ ->
+              Code_error.raise
+                "Multiple matching directory targets"
+                [ "targets", Targets.Validated.to_dyn rule.targets ]
+          in
+          User_error.raise
+            ~loc:rule.loc
+            ~needs_stack_trace:true
+            [ Pp.textf
+                "This rule defines a directory target %S that matches the requested path \
+                 %S but the rule's action didn't produce it"
+                matching_target
+                target
+            ]
+      in
+      trace_finish (Some rule);
+      result
 
   and execute_anonymous_action action =
     let* action, facts = Action_builder.evaluate_and_collect_facts action in
@@ -939,6 +950,8 @@ module Internal = struct
     | Action x -> dep_on_anonymous_action x
 
   and build_alias_impl alias =
+    Graph_trace.Build_dep.alias alias
+    @@ fun trace_finish ->
     let+ l =
       Load_rules.get_alias_definition alias
       >>= Memo.parallel_map ~f:(fun (loc, definition) ->
@@ -949,6 +962,7 @@ module Internal = struct
              >>| snd)
           ~human_readable_description:(fun () -> Alias.describe alias ~loc))
     in
+    trace_finish l;
     Dep.Facts.group_paths_as_fact_files l
 
   and eval_pred_impl g =

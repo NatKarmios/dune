@@ -38,6 +38,7 @@ The category emits these event kinds (the "gen-rules-*" events span rule
 generation for a directory and its dune file):
 
   $ dune trace cat | jq -r 'select(.cat == "graph") | .name' | sort -u
+  build-dep
   exec-rule
   exec-rule-action-finish
   exec-rule-action-start

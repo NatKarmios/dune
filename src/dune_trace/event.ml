@@ -105,6 +105,8 @@ module Event = struct
   ;;
 end
 
+type async_id = int
+
 (* Fresh ids for the Chrome async events above. A single counter across all such
    events keeps ids unique, so begin/end/instant events never mis-pair. *)
 let async_next_id = ref 0
@@ -1147,30 +1149,79 @@ module Graph = struct
   ;;
 
   type forced_by =
-    | Top_level
-    | Rule of int
-    | Dune_dyn of Path.Source.t
-    | Gen_rules of
+    | Forced_by_rule of int
+    | Forced_by_dep of Dyn.t
+    | Forced_by_dynamic_includes of Path.Source.t
+    | Forced_by_rule_gen of
         { dir : Path.Build.t
         ; source_dir : Path.Source.t option
         }
 
-  let forced_by_arg forced_by =
-    let parts =
-      match forced_by with
-      | Top_level -> [ Arg.string "top-level" ]
-      | Rule id -> [ Arg.string "rule"; Arg.int id ]
-      | Dune_dyn path -> [ Arg.string "dune-dyn"; Arg.source_path path ]
-      | Gen_rules { dir; source_dir } ->
-        Arg.string "gen-rules"
-        :: Arg.build_path dir
-        ::
-        (match source_dir with
-         | None -> []
-         | Some source_dir -> [ Arg.source_path source_dir ])
-    in
-    "forced_by", Arg.list parts
+  let forced_by_arg = function
+    | None -> []
+    | Some forced_by ->
+      let parts =
+        match forced_by with
+        | Forced_by_rule id -> [ Arg.string "rule"; Arg.int id ]
+        | Forced_by_dep dep -> [ Arg.string "dep"; Arg.dyn dep ]
+        | Forced_by_dynamic_includes path ->
+          [ Arg.string "dynamic-includes"; Arg.source_path path ]
+        | Forced_by_rule_gen { dir; source_dir } ->
+          Arg.string "rule-gen"
+          :: Arg.build_path dir
+          ::
+          (match source_dir with
+           | None -> []
+           | Some source_dir -> [ Arg.source_path source_dir ])
+      in
+      [ "forced_by", Arg.list parts ]
   ;;
+
+  module Build_dep = struct
+    (* How building a dep resolved: it belonged to a [Dep_rule] (by id), it
+       [Dep_expanded] to concrete deps (e.g. an alias or glob), or it was a
+       source file ([Dep_is_source]). *)
+    type outcome =
+      | Dep_rule of int
+      | Dep_expanded of Dyn.t list
+      | Dep_is_source
+
+    (* Async span for building a single dep, keyed by [async_id]: [start] emits
+       the begin (carrying the interned [dep]) and [finish] the matching end
+       (carrying the [outcome]). Deps are interned, so each returns its event
+       preceded by an [intern-deps] event for deps seen for the first time; emit
+       the whole list (e.g. with [emit_all]). *)
+    let start ~async_id ~forced_by ~dep =
+      let ts = Time.now () in
+      let intern_events, ids = intern_deps ~ts [ dep ] in
+      let dep_arg =
+        match ids with
+        | [ id ] -> [ "dep", Arg.int id ]
+        | _ -> []
+      in
+      let args = dep_arg @ forced_by_arg forced_by in
+      intern_events @ [ Event.async_begin ~args ~async_id ~name:"build-dep" ts Graph ]
+    ;;
+
+    let finish ~async_id ~(outcome : outcome) =
+      let ts = Time.now () in
+      let expanded =
+        match outcome with
+        | Dep_expanded deps -> deps
+        | Dep_rule _ | Dep_is_source -> []
+      in
+      let intern_events, expanded_ids = intern_deps ~ts expanded in
+      let outcome_arg =
+        match outcome with
+        | Dep_rule rule_id -> Arg.list [ Arg.string "rule"; Arg.int rule_id ]
+        | Dep_expanded _ ->
+          Arg.list (Arg.string "expanded" :: List.map expanded_ids ~f:Arg.int)
+        | Dep_is_source -> Arg.list [ Arg.string "is-source" ]
+      in
+      let args = [ "outcome", outcome_arg ] in
+      intern_events @ [ Event.async_end ~args ~async_id ~name:"build-dep" ts Graph ]
+    ;;
+  end
 
   module Exec_rule = struct
     type outcome =
@@ -1187,9 +1238,8 @@ module Graph = struct
     let start ~async_id ~rule_id ~targets ~forced_by ~start =
       let intern_events, file_ids, dir_ids = intern_targets ~ts:start targets in
       let args =
-        ("rule_id", Arg.int rule_id)
-        :: forced_by_arg forced_by
-        :: target_args ~file_ids ~dir_ids
+        (("rule_id", Arg.int rule_id) :: forced_by_arg forced_by)
+        @ target_args ~file_ids ~dir_ids
       in
       intern_events @ [ Event.async_begin ~args ~async_id ~name:"exec-rule" start Graph ]
     ;;
