@@ -602,24 +602,27 @@ module Perfetto_conv = struct
   ;;
 
   (* [Graph.forced_by] as the nested ForcedBy message: exactly one field set,
-     matching the variant tag in the leading atom. *)
-  let forced_by_message = function
+     matching the variant tag in the leading atom. The dep/path payloads are
+     interned ids (the [rule] payload is a bare rule id), resolved here. *)
+  let forced_by_message t = function
     | Sexp.List (Atom "rule" :: Atom id :: _) ->
       (match int_of_string_opt id with
        | Some n -> [ P.Proto.varint ~field:Ext.fb_rule n ]
        | None -> [])
-    | Sexp.List (Atom "dep" :: Atom dep :: _) -> [ P.Proto.string ~field:Ext.fb_dep dep ]
+    | Sexp.List (Atom "dep" :: Atom dep :: _) ->
+      [ P.Proto.string ~field:Ext.fb_dep (resolve_id t.names dep) ]
     | Sexp.List (Atom "dynamic-includes" :: Atom path :: _) ->
-      [ P.Proto.string ~field:Ext.fb_dynamic_includes path ]
+      [ P.Proto.string ~field:Ext.fb_dynamic_includes (resolve_id t.names path) ]
     | Sexp.List (Atom "rule-gen" :: Atom dir :: rest) ->
       let source_dir =
         match rest with
-        | Sexp.Atom sd :: _ -> [ P.Proto.string ~field:Ext.rg_source_dir sd ]
+        | Sexp.Atom sd :: _ ->
+          [ P.Proto.string ~field:Ext.rg_source_dir (resolve_id t.names sd) ]
         | _ -> []
       in
       [ P.Proto.message
           ~field:Ext.fb_rule_gen
-          (P.Proto.string ~field:Ext.rg_dir dir :: source_dir)
+          (P.Proto.string ~field:Ext.rg_dir (resolve_id t.names dir) :: source_dir)
       ]
     | _ -> []
   ;;
@@ -678,7 +681,7 @@ module Perfetto_conv = struct
             | Some n -> ext := P.Proto.varint ~field:Ext.rule_id n :: !ext
             | None -> annots := scalar_arg key v :: !annots)
          | "forced_by", _ ->
-           (match forced_by_message v with
+           (match forced_by_message t v with
             | [] -> annots := scalar_arg key v :: !annots
             | fields -> ext := P.Proto.message ~field:Ext.forced_by fields :: !ext)
          | "rule_outcome", Sexp.Atom s ->

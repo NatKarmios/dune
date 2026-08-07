@@ -1114,24 +1114,34 @@ module Graph = struct
         ; source_dir : Path.Source.t option
         }
 
-  let forced_by_arg = function
-    | None -> []
+  (* The dep/path payloads of [forced_by] are interned like any other trace
+     path, so this returns the intern events (for values seen for the first
+     time) alongside the [forced_by] arg, whose payloads are the resulting ids.
+     [Forced_by_rule]'s payload is a rule id, not a path, so it is left inline. *)
+  let forced_by_args ~ts = function
+    | None -> [], []
     | Some forced_by ->
-      let parts =
+      let tag, strings =
         match forced_by with
-        | Forced_by_rule id -> [ Arg.string "rule"; Arg.int id ]
-        | Forced_by_dep dep -> [ Arg.string "dep"; Arg.string dep ]
+        | Forced_by_rule id -> `Rule id, []
+        | Forced_by_dep dep -> `Paths "dep", [ dep ]
         | Forced_by_dynamic_includes path ->
-          [ Arg.string "dynamic-includes"; Arg.source_path path ]
+          `Paths "dynamic-includes", [ Path.Source.to_string path ]
         | Forced_by_rule_gen { dir; source_dir } ->
-          Arg.string "rule-gen"
-          :: Arg.build_path dir
-          ::
-          (match source_dir with
-           | None -> []
-           | Some source_dir -> [ Arg.source_path source_dir ])
+          ( `Paths "rule-gen"
+          , Path.Build.to_string dir
+            ::
+            (match source_dir with
+             | None -> []
+             | Some source_dir -> [ Path.Source.to_string source_dir ]) )
       in
-      [ "forced_by", Arg.list parts ]
+      let intern_events, ids = intern_strings ~ts strings in
+      let parts =
+        match tag with
+        | `Rule id -> [ Arg.string "rule"; Arg.int id ]
+        | `Paths name -> Arg.string name :: List.map ids ~f:Arg.int
+      in
+      intern_events, [ "forced_by", Arg.list parts ]
   ;;
 
   module Build_dep = struct
@@ -1156,8 +1166,11 @@ module Graph = struct
         | [ id ] -> [ "dep", Arg.int id ]
         | _ -> []
       in
-      let args = dep_arg @ forced_by_arg forced_by in
-      intern_events @ [ Event.async_begin ~args ~async_id ~name:"build-dep" ts Graph ]
+      let forced_by_intern_events, forced_by_args = forced_by_args ~ts forced_by in
+      let args = dep_arg @ forced_by_args in
+      intern_events
+      @ forced_by_intern_events
+      @ [ Event.async_begin ~args ~async_id ~name:"build-dep" ts Graph ]
     ;;
 
     let finish ~async_id ~(outcome : outcome) =
@@ -1194,11 +1207,13 @@ module Graph = struct
 
     let start ~async_id ~rule_id ~targets ~forced_by ~start =
       let intern_events, target_ids = intern_strings ~ts:start targets in
+      let forced_by_intern_events, forced_by_args = forced_by_args ~ts:start forced_by in
       let args =
-        (("rule_id", Arg.int rule_id) :: forced_by_arg forced_by)
-        @ ids_arg "targets" target_ids
+        (("rule_id", Arg.int rule_id) :: forced_by_args) @ ids_arg "targets" target_ids
       in
-      intern_events @ [ Event.async_begin ~args ~async_id ~name:"exec-rule" start Graph ]
+      intern_events
+      @ forced_by_intern_events
+      @ [ Event.async_begin ~args ~async_id ~name:"exec-rule" start Graph ]
     ;;
 
     (* The matching end. It carries the resolved [deps] and the dynamic deps
