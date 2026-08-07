@@ -28,6 +28,24 @@ module Arg = struct
   let array ~name xs = { arg_name = name; value = Array xs }
 end
 
+module Proto = struct
+  type t =
+    { number : int
+    ; value : value
+    }
+
+  and value =
+    | Varint of int
+    | Bool of bool
+    | Str of string
+    | Msg of t list
+
+  let varint ~field n = { number = field; value = Varint n }
+  let bool ~field b = { number = field; value = Bool b }
+  let string ~field s = { number = field; value = Str s }
+  let message ~field fields = { number = field; value = Msg fields }
+end
+
 module Track = struct
   type kind =
     | Process of { pid : int }
@@ -81,18 +99,37 @@ module Event = struct
     ; categories : string list
     ; eargs : Arg.t list
     ; flow_ids : int list
+    ; extension : Proto.t option
     ; track_uuid : int
     ; ts : int
     }
 
-  let create ?name ?(categories = []) ?(args = []) ?(flow_ids = []) type_ ~track_uuid ~ts =
-    { etype = type_; ename = name; categories; eargs = args; flow_ids; track_uuid; ts }
+  let create
+        ?name
+        ?(categories = [])
+        ?(args = [])
+        ?(flow_ids = [])
+        ?extension
+        type_
+        ~track_uuid
+        ~ts
+    =
+    { etype = type_
+    ; ename = name
+    ; categories
+    ; eargs = args
+    ; flow_ids
+    ; extension
+    ; track_uuid
+    ; ts
+    }
   ;;
 end
 
 type packet =
   | Track_descriptor of Track.t
   | Track_event of Event.t
+  | Extension_descriptor of Proto.t list
 
 (* All packets from a single writer share one non-zero sequence id; without it
    Perfetto silently drops track events. *)
@@ -179,6 +216,15 @@ module To_bytes = struct
         Wire.message_field buf ~field:12 (fun b -> arg ~named:false b e))
   ;;
 
+  let rec proto_field buf { Proto.number; value } =
+    match value with
+    | Varint n -> Wire.varint_field buf ~field:number n
+    | Bool b -> Wire.bool_field buf ~field:number b
+    | Str s -> Wire.string_field buf ~field:number s
+    | Msg fields ->
+      Wire.message_field buf ~field:number (fun b -> List.iter fields ~f:(proto_field b))
+  ;;
+
   let event buf (e : Event.t) =
     Wire.varint_field buf ~field:9 (Event.Type.enum e.etype);
     (match e.ename with
@@ -188,7 +234,10 @@ module To_bytes = struct
     Wire.varint_field buf ~field:11 e.track_uuid;
     List.iter e.eargs ~f:(fun a ->
       Wire.message_field buf ~field:4 (fun b -> arg ~named:true b a));
-    List.iter e.flow_ids ~f:(fun id -> Wire.fixed64_field buf ~field:47 (Int64.of_int id))
+    List.iter e.flow_ids ~f:(fun id -> Wire.fixed64_field buf ~field:47 (Int64.of_int id));
+    match e.extension with
+    | Some ext -> proto_field buf ext
+    | None -> ()
   ;;
 
   let track buf (t : Track.t) =
@@ -218,6 +267,13 @@ module To_bytes = struct
         Wire.varint_field p ~field:8 e.ts;
         Wire.varint_field p ~field:10 trusted_packet_sequence_id;
         Wire.message_field p ~field:11 (fun b -> event b e))
+    | Extension_descriptor fields ->
+      (* TracePacket.extension_descriptor = 72, holding an ExtensionDescriptor
+         whose extension_set (field 1) is the FileDescriptorSet. *)
+      Wire.message_field buf ~field:1 (fun p ->
+        Wire.varint_field p ~field:10 trusted_packet_sequence_id;
+        Wire.message_field p ~field:72 (fun ed ->
+          Wire.message_field ed ~field:1 (fun es -> List.iter fields ~f:(proto_field es))))
   ;;
 
   let to_bytes packets =
@@ -256,6 +312,18 @@ module To_text = struct
         line "array_values {";
         arg b (indent + 1) e;
         line "}")
+  ;;
+
+  let rec proto b indent { Proto.number; value } =
+    let line fmt = line b indent fmt in
+    match value with
+    | Varint n -> line "field_%d: %d" number n
+    | Bool x -> line "field_%d: %b" number x
+    | Str s -> line "field_%d: %S" number s
+    | Msg fields ->
+      line "field_%d {" number;
+      List.iter fields ~f:(proto b (indent + 1));
+      line "}"
   ;;
 
   let track b indent (t : Track.t) =
@@ -297,6 +365,9 @@ module To_text = struct
       arg b (i + 1) a;
       line i "}");
     List.iter e.flow_ids ~f:(fun id -> line i "flow_ids: %d" id);
+    (match e.extension with
+     | Some ext -> proto b i ext
+     | None -> ());
     line indent "}"
   ;;
 
@@ -306,7 +377,13 @@ module To_text = struct
       line b 0 "packet {";
       (match packet with
        | Track_descriptor t -> track b 1 t
-       | Track_event e -> event b 1 e);
+       | Track_event e -> event b 1 e
+       | Extension_descriptor fields ->
+         line b 1 "extension_descriptor {";
+         line b 2 "extension_set {";
+         List.iter fields ~f:(proto b 3);
+         line b 2 "}";
+         line b 1 "}");
       line b 0 "}");
     Buffer.contents b
   ;;
