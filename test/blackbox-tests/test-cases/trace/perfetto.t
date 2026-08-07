@@ -40,18 +40,38 @@ Each async span gets its own track, named by the event's category:
   $ dune trace perfetto --text | grep -q 'name: "graph"' && echo yes
   yes
 
-Interned target ids are resolved back to readable paths, and `forced_by` is
-attached as a debug annotation:
+The structural graph fields (targets, deps, forced_by, ...) are promoted from
+generic debug annotations to a typed `TrackEvent` extension. A descriptor packet
+embeds a `FileDescriptorSet` naming the schema, `dune.DuneTrackEvent` extending
+`perfetto.protos.TrackEvent`, so Trace Processor decodes them into its args table
+(e.g. `EXTRACT_ARG(arg_set_id, 'dune.targets')`):
 
-  $ dune trace perfetto --text | grep -q 'string_value: "_build/default/out.txt"' && echo yes
+  $ dune trace perfetto --text | grep -q 'field_1: "DuneTrackEvent"' && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "forced_by"' && echo yes
+  $ dune trace perfetto --text | grep -q 'field_2: ".perfetto.protos.TrackEvent"' && echo yes
   yes
 
-The interned "dep" argument on build-dep events is likewise resolved to its
-readable value (building out.txt depends on dep.txt):
+Tagged unions are modelled as nested messages rather than flattened strings:
+`forced_by` is a `ForcedBy`, and build-dep's `dep_outcome` is a `DepOutcome`
+(distinct from exec-rule's plain `rule_outcome` string). Exec-rule's `rule_id` is
+also included:
 
-  $ dune trace perfetto --text | grep -A1 'name: "dep"' | grep -q 'dep.txt' && echo yes
+  $ dune trace perfetto --text | grep -q 'field_1: "ForcedBy"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'field_1: "DepOutcome"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'field_1: "rule_id"' && echo yes
+  yes
+
+The extension is spliced onto each graph event at field 9910, with interned
+target and dep ids resolved to readable paths (targets = field 1, dep =
+field 3):
+
+  $ dune trace perfetto --text | grep -q 'field_9910 {' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'field_1: "_build/default/out.txt"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'field_3: "_build/default/dep.txt"' && echo yes
   yes
 
 Without `--text` it writes the binary protobuf. The output is a stream of

@@ -1175,7 +1175,7 @@ module Graph = struct
           Arg.list (Arg.string "expanded" :: List.map expanded_ids ~f:Arg.int)
         | Dep_is_source -> Arg.list [ Arg.string "is-source" ]
       in
-      let args = [ "outcome", outcome_arg ] in
+      let args = [ "dep_outcome", outcome_arg ] in
       intern_events @ [ Event.async_end ~args ~async_id ~name:"build-dep" ts Graph ]
     ;;
   end
@@ -1203,7 +1203,9 @@ module Graph = struct
 
     let finish ~async_id ~rule_id ~outcome =
       let args =
-        [ "rule_id", Arg.int rule_id; "outcome", Arg.string (outcome_to_string outcome) ]
+        [ "rule_id", Arg.int rule_id
+        ; "rule_outcome", Arg.string (outcome_to_string outcome)
+        ]
       in
       Event.async_end ~args ~async_id ~name:"exec-rule" (Time.now ()) Graph
     ;;

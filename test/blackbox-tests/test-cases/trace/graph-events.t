@@ -95,7 +95,7 @@ sharing that id:
   >        | select([ (.args.targets // [])[] | $names[tostring] ] | any(endswith("out.txt")))
   >        | .async_id ][0]) as $rule
   >   | [ .[] | select(.name == "exec-rule" and .async_phase == "end" and .async_id == $rule)
-  >       | .args.outcome ][0]
+  >       | .args.rule_outcome ][0]
   > '
   executed
 
