@@ -48,10 +48,7 @@ module Forced_by = struct
     | Forced_by_rule of Rule.Id.t
     | Forced_by_dep of Dep.t
     | Forced_by_dynamic_includes of Path.Source.t
-    | Forced_by_rule_gen of
-        { dir : Path.Build.t
-        ; source_dir : Path.Source.t option
-        }
+    | Forced_by_gen_rules of Path.Build.t
 
   type t = t'
 
@@ -59,7 +56,7 @@ module Forced_by = struct
     | Forced_by_rule id -> Forced_by_rule (Rule.Id.to_int id)
     | Forced_by_dep dep -> Forced_by_dep (dep_to_string dep)
     | Forced_by_dynamic_includes path -> Forced_by_dynamic_includes path
-    | Forced_by_rule_gen { dir; source_dir } -> Forced_by_rule_gen { dir; source_dir }
+    | Forced_by_gen_rules dir -> Forced_by_gen_rules dir
   ;;
 
   (* The forcer of the current dynamic context. Each scope sets it while running
@@ -71,7 +68,7 @@ module Forced_by = struct
   let rule ~rule:{ Rule.id; _ } = Forced_by_rule id
   let dep ~dep = Forced_by_dep dep
   let dynamic_includes ~dune_file = Forced_by_dynamic_includes dune_file
-  let rule_gen ~dir ?source_dir () = Forced_by_rule_gen { dir; source_dir }
+  let gen_rules ~dir = Forced_by_gen_rules dir
 end
 
 module Build_dep = struct
@@ -222,48 +219,27 @@ module Dynamic_includes = struct
 end
 
 module Gen_rules = struct
-  (* Wraps the generation of rules for [dir]. Emits a [gen-rules-dir-start] /
-     [gen-rules-dir-finish] pair around [f] and sets [forced_by] to
-     [Gen_rules { dir }] so that builds forced while generating the directory's
-     rules are attributed to it. *)
-  let dir ~(dir : Path.Build.t) (f : unit -> 'a Memo.t) : 'a Memo.t =
+  (* Wraps the generation of rules for [dir]. Emits a [gen-rules] begin/end pair
+     around [f] and sets [forced_by] to [Forced_by_rule_gen { dir }] so that
+     builds forced while generating the directory's rules are attributed to it.
+     [f] is handed a callback to report the source [dune_file] driving the
+     directory (for a standalone/group root); it is carried on the end event. *)
+  let start ~(dir : Path.Build.t) (f : (Path.Source.t -> unit) -> 'a Memo.t) : 'a Memo.t =
     if enabled Category.Graph
     then (
       let async_id = Event.gen_async_id () in
-      let new_forcer = Forced_by.rule_gen ~dir () in
+      let new_forcer = Forced_by.gen_rules ~dir in
       let start = Time.now () in
       Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-        Graph.Gen_rules.dir_start ~async_id ~dir ~start);
+        Graph.Gen_rules.start ~async_id ~dir ~start);
+      let dune_file = ref None in
+      let report_dune_file df = dune_file := Some df in
       let open Fiber.O in
-      (let+ result = Forced_by.set ~new_forcer f () in
+      (let+ result = Forced_by.set ~new_forcer f report_dune_file in
        Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-         Graph.Gen_rules.dir_finish ~async_id);
+         Graph.Gen_rules.finish ~async_id ~dune_file:!dune_file);
        result)
       |> Memo.of_reproducible_fiber)
-    else f ()
-  ;;
-
-  (* Like [dir] but also attributes the [source_dir] (the standalone/root
-     case). *)
-  let dune_file
-        ~(dir : Path.Build.t)
-        ~(source_dir : Path.Source.t)
-        (f : unit -> 'a Memo.t)
-    : 'a Memo.t
-    =
-    if enabled Category.Graph
-    then (
-      let async_id = Event.gen_async_id () in
-      let new_forcer = Forced_by.rule_gen ~dir ~source_dir () in
-      let start = Time.now () in
-      Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-        Graph.Gen_rules.dune_file_start ~async_id ~dir ~source_dir ~start);
-      let open Fiber.O in
-      (let+ result = Forced_by.set ~new_forcer f () in
-       Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-         Graph.Gen_rules.dune_file_finish ~async_id);
-       result)
-      |> Memo.of_reproducible_fiber)
-    else f ()
+    else f ignore
   ;;
 end

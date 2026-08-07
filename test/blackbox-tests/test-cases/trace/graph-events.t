@@ -28,14 +28,14 @@ mappings, and the other events refer to them by id thereafter.
 
   $ DUNE_TRACE=+graph dune build out.txt
 
-The category emits these event kinds (the "gen-rules-*" events span rule
-generation for a directory and its dune file):
+The category emits these event kinds (the "gen-rules" event spans rule
+generation for a directory, carrying the dune file that drives it when there is
+one):
 
   $ dune trace cat | jq -r 'select(.cat == "graph") | .name' | sort -u
   build-dep
   exec-rule
-  gen-rules-dir
-  gen-rules-dune-file
+  gen-rules
   intern
 
 Every exec-rule event shares its rule's async id, with exactly one begin and one

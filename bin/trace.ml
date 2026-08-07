@@ -327,9 +327,7 @@ module Perfetto_conv = struct
     let fb_rule = 1
     let fb_dep = 2
     let fb_dynamic_includes = 3
-    let fb_rule_gen = 4
-    let rg_dir = 1
-    let rg_source_dir = 2
+    let fb_gen_rules = 4
     let do_rule = 1
     let do_expanded = 2
     let do_is_source = 3
@@ -415,21 +413,7 @@ module Perfetto_conv = struct
               ~number:fb_dynamic_includes
               ~label:label_optional
               ()
-          ; message_field
-              ~name:"rule_gen"
-              ~number:fb_rule_gen
-              ~label:label_optional
-              ~type_name:".dune.DuneTrackEvent.ForcedBy.RuleGen"
-              ()
-          ; message
-              ~name:"RuleGen"
-              [ string_field ~name:"dir" ~number:rg_dir ~label:label_optional ()
-              ; string_field
-                  ~name:"source_dir"
-                  ~number:rg_source_dir
-                  ~label:label_optional
-                  ()
-              ]
+          ; string_field ~name:"gen_rules" ~number:fb_gen_rules ~label:label_optional ()
           ]
       in
       let dep_outcome_msg =
@@ -613,17 +597,8 @@ module Perfetto_conv = struct
       [ P.Proto.string ~field:Ext.fb_dep (resolve_id t.names dep) ]
     | Sexp.List (Atom "dynamic-includes" :: Atom path :: _) ->
       [ P.Proto.string ~field:Ext.fb_dynamic_includes (resolve_id t.names path) ]
-    | Sexp.List (Atom "rule-gen" :: Atom dir :: rest) ->
-      let source_dir =
-        match rest with
-        | Sexp.Atom sd :: _ ->
-          [ P.Proto.string ~field:Ext.rg_source_dir (resolve_id t.names sd) ]
-        | _ -> []
-      in
-      [ P.Proto.message
-          ~field:Ext.fb_rule_gen
-          (P.Proto.string ~field:Ext.rg_dir (resolve_id t.names dir) :: source_dir)
-      ]
+    | Sexp.List (Atom "gen-rules" :: Atom dir :: _) ->
+      [ P.Proto.string ~field:Ext.fb_gen_rules (resolve_id t.names dir) ]
     | _ -> []
   ;;
 

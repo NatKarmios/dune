@@ -26,16 +26,10 @@ end
 
 module Gen_rules : sig
   (** Trace rule generation for [dir], recording it as the [forced_by] context
-      for any build forced while [f] runs (e.g. by pform expansion). *)
-  val dir : dir:Path.Build.t -> (unit -> 'a Memo.t) -> 'a Memo.t
-
-  (** Like {!dir} but also attributes the [source_dir] (the standalone/root
-      case). *)
-  val dune_file
-    :  dir:Path.Build.t
-    -> source_dir:Path.Source.t
-    -> (unit -> 'a Memo.t)
-    -> 'a Memo.t
+      for any build forced while [f] runs (e.g. by pform expansion). [f] is
+      handed a callback to report the source [dune_file] driving the directory
+      (for a standalone/group root), which is attached to the span. *)
+  val start : dir:Path.Build.t -> ((Path.Source.t -> unit) -> 'a Memo.t) -> 'a Memo.t
 end
 
 module Build_dep : sig

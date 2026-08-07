@@ -295,10 +295,7 @@ module Event : sig
       | Forced_by_rule of int
       | Forced_by_dep of string
       | Forced_by_dynamic_includes of Path.Source.t
-      | Forced_by_rule_gen of
-          { dir : Path.Build.t
-          ; source_dir : Path.Source.t option
-          }
+      | Forced_by_gen_rules of Path.Build.t
 
     module Build_dep : sig
       (** How building a dep resolved: it belonged to a [Dep_rule] (by id), it
@@ -357,17 +354,8 @@ module Event : sig
     end
 
     module Gen_rules : sig
-      val dir_start : async_id:async_id -> dir:Path.Build.t -> start:Time.t -> t
-      val dir_finish : async_id:async_id -> t
-
-      val dune_file_start
-        :  async_id:async_id
-        -> dir:Path.Build.t
-        -> source_dir:Path.Source.t
-        -> start:Time.t
-        -> t
-
-      val dune_file_finish : async_id:async_id -> t
+      val start : async_id:async_id -> dir:Path.Build.t -> start:Time.t -> t
+      val finish : async_id:async_id -> dune_file:Path.Source.t option -> t
     end
   end
 end

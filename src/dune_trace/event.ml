@@ -1109,10 +1109,7 @@ module Graph = struct
     | Forced_by_rule of int
     | Forced_by_dep of string
     | Forced_by_dynamic_includes of Path.Source.t
-    | Forced_by_rule_gen of
-        { dir : Path.Build.t
-        ; source_dir : Path.Source.t option
-        }
+    | Forced_by_gen_rules of Path.Build.t
 
   (* The dep/path payloads of [forced_by] are interned like any other trace
      path, so this returns the intern events (for values seen for the first
@@ -1127,13 +1124,7 @@ module Graph = struct
         | Forced_by_dep dep -> `Paths "dep", [ dep ]
         | Forced_by_dynamic_includes path ->
           `Paths "dynamic-includes", [ Path.Source.to_string path ]
-        | Forced_by_rule_gen { dir; source_dir } ->
-          ( `Paths "rule-gen"
-          , Path.Build.to_string dir
-            ::
-            (match source_dir with
-             | None -> []
-             | Some source_dir -> [ Path.Source.to_string source_dir ]) )
+        | Forced_by_gen_rules dir -> `Paths "gen-rules", [ Path.Build.to_string dir ]
       in
       let intern_events, ids = intern_strings ~ts strings in
       let parts =
@@ -1266,33 +1257,25 @@ module Graph = struct
   end
 
   module Gen_rules = struct
-    (* Span events for rule generation. [dir_*] attribute a directory (the
-       outermost [gen_rules]); [dune_file_*] attribute a directory together with
-       its dune file (the standalone/root case). *)
-    let dir_start ~async_id ~dir ~start =
+    (* Span for generating a directory's rules, carrying the build [dir] and,
+       once known (a standalone/group-root directory), the source [dune_file]
+       that drives it. *)
+    let start ~async_id ~dir ~start =
       Event.async_begin
         ~args:[ "dir", Arg.build_path dir ]
         ~async_id
-        ~name:"gen-rules-dir"
+        ~name:"gen-rules"
         start
         Graph
     ;;
 
-    let dir_finish ~async_id =
-      Event.async_end ~async_id ~name:"gen-rules-dir" (Time.now ()) Graph
-    ;;
-
-    let dune_file_start ~async_id ~dir ~source_dir ~start =
-      Event.async_begin
-        ~args:[ "dir", Arg.build_path dir; "source_dir", Arg.source_path source_dir ]
-        ~async_id
-        ~name:"gen-rules-dune-file"
-        start
-        Graph
-    ;;
-
-    let dune_file_finish ~async_id =
-      Event.async_end ~async_id ~name:"gen-rules-dune-file" (Time.now ()) Graph
+    let finish ~async_id ~dune_file =
+      let args =
+        match dune_file with
+        | None -> []
+        | Some dune_file -> [ "dune_file", Arg.source_path dune_file ]
+      in
+      Event.async_end ~args ~async_id ~name:"gen-rules" (Time.now ()) Graph
     ;;
   end
 end
