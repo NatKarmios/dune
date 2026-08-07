@@ -531,7 +531,7 @@ module Internal = struct
 
   and execute_rule_impl ~rule_kind rule =
     Graph_trace.Exec_rule.start ~rule
-    @@ fun graph_trace ->
+    @@ fun finish ->
     let { Rule.id = _; targets; mode; action; info = _; loc } = rule in
     let head_target = Targets.Validated.head targets in
     let* execution_parameters =
@@ -549,9 +549,7 @@ module Internal = struct
        function [(Build_config.get ()).execution_parameters] is likely
        memoized, and the result is not expected to change often, so we do not
        sacrifice too much performance here by executing it sequentially. *)
-    graph_trace.deps_start ();
     let* action, facts = Action_builder.evaluate_and_collect_facts action in
-    graph_trace.deps_finish (Dep.Set.of_keys facts);
     let wrap_fiber f =
       Memo.of_reproducible_fiber
         (if Loc.is_none loc
@@ -618,7 +616,7 @@ module Internal = struct
           false
         | _ -> true
       in
-      let* (produced_targets : Digest.t Targets.Produced.t), outcome =
+      let* (produced_targets : Digest.t Targets.Produced.t), outcome, dyn_deps =
         (* Step I. Check if the workspace-local cache is up to date. *)
         Rule_cache.Workspace_local.lookup
           ~always_rerun
@@ -629,7 +627,7 @@ module Internal = struct
         >>= function
         | Some produced_targets ->
           let outcome = Graph_trace.Exec_rule.Local_cache_hit in
-          Fiber.return (produced_targets, outcome)
+          Fiber.return (produced_targets, outcome, [])
         | None ->
           (* Step II. Remove stale targets both from the digest table and from
              the build directory. *)
@@ -675,7 +673,6 @@ module Internal = struct
               let outcome = Graph_trace.Exec_rule.Shared_cache_hit in
               Fiber.return (produced_targets, dynamic_deps_stages, outcome)
             | None ->
-              graph_trace.action_start ();
               (* Step IV. Execute the build action. *)
               let* exec_result =
                 execute_action_for_rule
@@ -710,7 +707,6 @@ module Internal = struct
                       Dep.Facts.digest fact_map d ~env:action.env;
                       Digest.Manual.get d ))
               in
-              graph_trace.action_finish (List.map dynamic_deps_stages ~f:fst);
               let outcome = Graph_trace.Exec_rule.Executed in
               Fiber.return (produced_targets, dynamic_deps_stages, outcome)
           in
@@ -722,7 +718,7 @@ module Internal = struct
             ~rule_digest
             ~dynamic_deps_stages
             ~targets_digest:(Targets.Produced.digest produced_targets);
-          Fiber.return (produced_targets, outcome)
+          Fiber.return (produced_targets, outcome, List.map dynamic_deps_stages ~f:fst)
       in
       let+ () =
         promote_targets
@@ -730,7 +726,7 @@ module Internal = struct
           ~targets:produced_targets
           ~promote_source:config.promote_source
       in
-      graph_trace.finish outcome;
+      finish ~deps:(Dep.Set.of_keys facts) ~dyn_deps outcome;
       produced_targets)
     (* jeremidimino: We need to include the dependencies discovered while
        running the action here. Otherwise, package dependencies are broken in

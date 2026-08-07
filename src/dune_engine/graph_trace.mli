@@ -8,17 +8,14 @@ module Exec_rule : sig
     | Local_cache_hit
     | Shared_cache_hit
 
-  module Other_events : sig
-    type t =
-      { deps_start : unit -> unit
-      ; deps_finish : Dep.Set.t -> unit
-      ; action_start : unit -> unit
-      ; action_finish : Dep.Set.t list -> unit
-      ; finish : outcome -> unit
-      }
-  end
-
-  val start : rule:Rule.t -> (Other_events.t -> 'a Memo.t) -> 'a Memo.t
+  (** Trace the execution of [rule] as an "exec-rule" async span. [f] is handed
+      a [finish] callback to emit the span's end, passing the resolved [deps],
+      the dynamic dependencies [dyn_deps] (one dep set per dynamic-deps stage),
+      and the execution [outcome]. *)
+  val start
+    :  rule:Rule.t
+    -> ((deps:Dep.Set.t -> dyn_deps:Dep.Set.t list -> outcome -> unit) -> 'a Memo.t)
+    -> 'a Memo.t
 end
 
 module Dune_dyn : sig

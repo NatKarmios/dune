@@ -1201,56 +1201,37 @@ module Graph = struct
       intern_events @ [ Event.async_begin ~args ~async_id ~name:"exec-rule" start Graph ]
     ;;
 
-    let finish ~async_id ~rule_id ~outcome =
+    (* The matching end. It carries the resolved [deps] and the dynamic deps
+       ([dyn_deps], one dep list per dynamic-deps stage) alongside the outcome,
+       all interned; it returns the end event preceded by an [intern] event for
+       any deps seen for the first time, so emit the whole list (e.g. with
+       [emit_all]). *)
+    let finish ~async_id ~rule_id ~deps ~dyn_deps ~outcome =
+      let ts = Time.now () in
+      let dep_intern_events, dep_ids = intern_strings ~ts deps in
+      let per_stage = List.map dyn_deps ~f:(intern_strings ~ts) in
+      let dyn_intern_events = List.concat_map per_stage ~f:fst in
+      let dyn_dep_ids = List.map per_stage ~f:snd in
+      let dyn_deps_arg =
+        match dyn_dep_ids with
+        | [] -> []
+        | _ ->
+          [ ( "dyn_deps"
+            , Arg.list
+                (List.map dyn_dep_ids ~f:(fun ids -> Arg.list (List.map ids ~f:Arg.int)))
+            )
+          ]
+      in
       let args =
         [ "rule_id", Arg.int rule_id
         ; "rule_outcome", Arg.string (outcome_to_string outcome)
         ]
+        @ ids_arg "deps" dep_ids
+        @ dyn_deps_arg
       in
-      Event.async_end ~args ~async_id ~name:"exec-rule" (Time.now ()) Graph
-    ;;
-
-    let rule_id_args rule_id = [ "rule_id", Arg.int rule_id ]
-
-    let deps_start ~async_id ~rule_id =
-      Event.async_instant
-        ~args:(rule_id_args rule_id)
-        ~async_id
-        ~name:"exec-rule-deps-start"
-        (Time.now ())
-        Graph
-    ;;
-
-    let deps_finish ~async_id ~rule_id ~deps =
-      let ts = Time.now () in
-      let intern_events, dep_ids = intern_strings ~ts deps in
-      let args = ids_arg "deps" dep_ids @ rule_id_args rule_id in
-      intern_events
-      @ [ Event.async_instant ~args ~async_id ~name:"exec-rule-deps-finish" ts Graph ]
-    ;;
-
-    let action_start ~async_id ~rule_id =
-      Event.async_instant
-        ~args:(rule_id_args rule_id)
-        ~async_id
-        ~name:"exec-rule-action-start"
-        (Time.now ())
-        Graph
-    ;;
-
-    let action_finish ~async_id ~rule_id ~dyn_deps =
-      let ts = Time.now () in
-      let per_list = List.map dyn_deps ~f:(intern_strings ~ts) in
-      let intern_events = List.concat_map per_list ~f:fst in
-      let dyn_dep_ids = List.map per_list ~f:snd in
-      let args =
-        ( "dyn_deps"
-        , Arg.list
-            (List.map dyn_dep_ids ~f:(fun ids -> Arg.list (List.map ids ~f:Arg.int))) )
-        :: rule_id_args rule_id
-      in
-      intern_events
-      @ [ Event.async_instant ~args ~async_id ~name:"exec-rule-action-finish" ts Graph ]
+      dep_intern_events
+      @ dyn_intern_events
+      @ [ Event.async_end ~args ~async_id ~name:"exec-rule" ts Graph ]
     ;;
   end
 

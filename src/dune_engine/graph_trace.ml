@@ -162,65 +162,24 @@ module Exec_rule = struct
         ~start
     ;;
 
-    let finish ~async_id ~rule_id outcome =
-      Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-        Graph.Exec_rule.finish ~async_id ~rule_id ~outcome)
-    ;;
-
-    let deps_start ~async_id ~rule_id () =
-      Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-        Graph.Exec_rule.deps_start ~async_id ~rule_id)
-    ;;
-
-    let deps_finish ~async_id ~rule_id (deps : Dep.Set.t) =
+    let finish ~async_id ~rule_id ~(deps : Dep.Set.t) ~(dyn_deps : Dep.Set.t list) outcome
+      =
       Dune_trace.emit_all ~buffered:true Category.Graph
       @@ fun () ->
       let deps = Dep.Set.to_list_map ~f:dep_to_string deps in
-      Graph.Exec_rule.deps_finish ~async_id ~rule_id ~deps
-    ;;
-
-    let action_start ~async_id ~rule_id () =
-      Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-        Graph.Exec_rule.action_start ~async_id ~rule_id)
-    ;;
-
-    let action_finish ~async_id ~rule_id (dyn_deps : Dep.Set.t list) =
-      Dune_trace.emit_all ~buffered:true Category.Graph
-      @@ fun () ->
       let dyn_deps = List.map dyn_deps ~f:(Dep.Set.to_list_map ~f:dep_to_string) in
-      Graph.Exec_rule.action_finish ~async_id ~rule_id ~dyn_deps
+      Graph.Exec_rule.finish ~async_id ~rule_id ~deps ~dyn_deps ~outcome
     ;;
   end
 
-  module Other_events = struct
-    type t =
-      { deps_start : unit -> unit
-      ; deps_finish : Dep.Set.t -> unit
-      ; action_start : unit -> unit
-      ; action_finish : Dep.Set.t list -> unit
-      ; finish : outcome -> unit
-      }
-
-    let empty =
-      { deps_start = ignore
-      ; deps_finish = ignore
-      ; action_start = ignore
-      ; action_finish = ignore
-      ; finish = ignore
-      }
-    ;;
-
-    let make ~async_id ~rule_id =
-      { deps_start = Emit.deps_start ~async_id ~rule_id
-      ; deps_finish = Emit.deps_finish ~async_id ~rule_id
-      ; action_start = Emit.action_start ~async_id ~rule_id
-      ; action_finish = Emit.action_finish ~async_id ~rule_id
-      ; finish = Emit.finish ~async_id ~rule_id
-      }
-    ;;
-  end
-
-  let start ~(rule : Rule.t) (f : Other_events.t -> 'a Memo.t) : 'a Memo.t =
+  (* [f] is handed a [finish] callback, called once the rule's execution has
+     resolved its [deps] and [dyn_deps] and produced an [outcome], to emit the
+     matching "exec-rule" end. *)
+  let start
+        ~(rule : Rule.t)
+        (f : (deps:Dep.Set.t -> dyn_deps:Dep.Set.t list -> outcome -> unit) -> 'a Memo.t)
+    : 'a Memo.t
+    =
     if enabled Category.Graph
     then (
       let new_forcer = Forced_by.rule ~rule in
@@ -230,10 +189,12 @@ module Exec_rule = struct
       (let* forced_by = Forced_by.get in
        let start = Time.now () in
        Emit.start ~rule ~async_id ~forced_by ~start;
-       let other_events = Other_events.make ~async_id ~rule_id in
-       Forced_by.set ~new_forcer f other_events)
+       let finish ~deps ~dyn_deps outcome =
+         Emit.finish ~async_id ~rule_id ~deps ~dyn_deps outcome
+       in
+       Forced_by.set ~new_forcer f finish)
       |> Memo.of_reproducible_fiber)
-    else f Other_events.empty
+    else f (fun ~deps:_ ~dyn_deps:_ _ -> ())
   ;;
 end
 

@@ -1,15 +1,9 @@
 Dune emits graph events around rule execution as a Chrome async span keyed by a
 generated id: an "exec-rule" async begin (carrying the rule's targets) and a
-matching "exec-rule" async end (carrying the execution outcome) bracket each
-execution. Both share the span's "async_id" and are told apart by their
-"async_phase".
-
-Within that span, async-instant events (sharing the same "async_id", and also
-carrying the "rule_id") mark the two phases of execution: "exec-rule-deps-start"
-/ "exec-rule-deps-finish" around dependency resolution (the finish carrying the
-resolved "deps"), and "exec-rule-action-start" / "exec-rule-action-finish"
-around running the action (the finish carrying the "dyn_deps", one dep list per
-dynamic-deps stage).
+matching "exec-rule" async end bracket each execution. Both share the span's
+"async_id" and are told apart by their "async_phase", and both carry the
+"rule_id". The end event carries the execution outcome, the resolved "deps", and
+the "dyn_deps" (one dep list per dynamic-deps stage).
 
 Targets and dependencies are rendered to strings and interned to integer ids:
 the first time some are seen an "intern" event records their id -> value
@@ -40,18 +34,12 @@ generation for a directory and its dune file):
   $ dune trace cat | jq -r 'select(.cat == "graph") | .name' | sort -u
   build-dep
   exec-rule
-  exec-rule-action-finish
-  exec-rule-action-start
-  exec-rule-deps-finish
-  exec-rule-deps-start
   gen-rules-dir
   gen-rules-dune-file
   intern
 
-Every exec-rule event shares its rule's async id: the "exec-rule" begin/end
-bracket the async-instant phase markers (deps-start/finish, and action-start/
-finish for rules that run an action). Each async id has exactly one begin and
-one end:
+Every exec-rule event shares its rule's async id, with exactly one begin and one
+end:
 
   $ dune trace cat | jq -sr '
   >   [ .[] | select(.cat == "graph" and (.name | startswith("exec-"))) ]
@@ -84,9 +72,9 @@ table gives back its target path:
     "_build/default/out.txt"
   ]
 
-The end event carries only the shared id and the outcome, so we find the begin
-event producing out.txt, take its id, and read the outcome off the end event
-sharing that id:
+The end event carries the outcome (along with the deps and dyn_deps), so we find
+the begin event producing out.txt, take its id, and read the outcome off the end
+event sharing that id:
 
   $ dune trace cat | jq -sr '
   >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
@@ -110,7 +98,7 @@ single entry, not expanded into the files it matches:
   >   | ([ .[] | select(.name == "exec-rule" and .async_phase == "begin")
   >        | select([ (.args.targets // [])[] | $names[tostring] ] | any(endswith("out.txt")))
   >        | .async_id ][0]) as $rule
-  >   | [ .[] | select(.name == "exec-rule-deps-finish" and .async_id == $rule)
+  >   | [ .[] | select(.name == "exec-rule" and .async_phase == "end" and .async_id == $rule)
   >       | .args.deps[] | $names[tostring] ]
   > '
   ["_build/default/dep.txt","_build/default@my-alias","_build/default/*.src"]

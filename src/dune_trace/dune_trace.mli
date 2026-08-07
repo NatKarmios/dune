@@ -326,12 +326,14 @@ module Event : sig
         | Shared_cache_hit
 
       (* The events are Chrome nestable-async events keyed by [async_id]:
-         [start] emits a begin and [finish] the matching end, while the phase
-         events below emit async-instant markers on the same track. They all
-         also carry [rule_id] (the rule's own identity, distinct from the async
-         chain's id). [start] returns its begin event preceded by an [intern]
-         event for targets seen for the first time; emit the whole list (e.g.
-         with [emit_all]) so ids are declared before referenced. *)
+         [start] emits a begin and [finish] the matching end. Both also carry
+         [rule_id] (the rule's own identity, distinct from the async chain's
+         id). [finish] additionally carries the resolved [deps] and the dynamic
+         dependencies [dyn_deps] (one dep list per dynamic-deps stage). Both
+         [start] and [finish] intern targets/deps and so return their event
+         preceded by an [intern] event for ids seen for the first time; emit the
+         whole list (e.g. with [emit_all]) so ids are declared before
+         referenced. *)
       val start
         :  async_id:async_id
         -> rule_id:int
@@ -340,22 +342,12 @@ module Event : sig
         -> start:Time.t
         -> t list
 
-      val finish : async_id:async_id -> rule_id:int -> outcome:outcome -> t
-
-      (* Async-instant markers on the rule's span bracketing the
-         dependency-resolution and action phases of its execution. [deps_finish]
-         carries the resolved dependencies and [action_finish] the dynamic
-         dependencies (one list per dynamic-dep node), both interned: they
-         return the marker preceded by an [intern] event for deps seen for the
-         first time, so emit the whole list (e.g. with [emit_all]). *)
-      val deps_start : async_id:async_id -> rule_id:int -> t
-      val deps_finish : async_id:async_id -> rule_id:int -> deps:string list -> t list
-      val action_start : async_id:async_id -> rule_id:int -> t
-
-      val action_finish
+      val finish
         :  async_id:async_id
         -> rule_id:int
+        -> deps:string list
         -> dyn_deps:string list list
+        -> outcome:outcome
         -> t list
     end
 
