@@ -291,6 +291,220 @@ module Perfetto_conv = struct
   let main_thread_uuid = 2
   let async_uuid id = id + 3
 
+  (* The structural graph-event fields are promoted from generic Perfetto
+     [DebugAnnotation]s to a typed [TrackEvent] extension, [dune.DuneTrackEvent],
+     so they land in Trace Processor's args table with stable names and types
+     (queryable as e.g. [EXTRACT_ARG(arg_set_id, 'dune.targets')]). Perfetto
+     learns the schema from an [Extension_descriptor] packet carrying a
+     hand-built [FileDescriptorSet]; the field numbers below are all fixed points
+     of Perfetto's / protobuf's own schemas. Any field the extension does not
+     model stays a [DebugAnnotation]. *)
+  module Ext = struct
+    (* Our extension's field number on [TrackEvent]. Must sit in TrackEvent's
+       reserved extension range and not clash with Chrome's (1000). *)
+    let track_event_field = 9910
+
+    (* DuneTrackEvent field numbers (see [descriptor] below). [forced_by] and
+       [dep_outcome] are tagged unions carried as nested messages; the two kinds
+       of rule/dep "outcome" event field have distinct names (rule execution vs.
+       dependency resolution), so they map to distinct extension fields. *)
+    let targets = 1
+    let deps = 2
+    let dep = 3
+    let forced_by = 4
+    let rule_outcome = 5
+    let process_args = 6
+    let dyn_deps = 7
+    let rule_id = 8
+    let dep_outcome = 9
+    let dyn_dep_stage_deps = 1
+
+    (* [ForcedBy] and [DepOutcome] are tagged unions where exactly one field is
+       set, mirroring [Graph.forced_by] / [Build_dep.outcome]. In real protobuf
+       these would be a [oneof], but Trace Processor's descriptor pool ignores
+       [oneof_decl] / [oneof_index] entirely (it decodes purely by field number),
+       so a [oneof] would buy nothing here; we model them as optional fields. *)
+    let fb_rule = 1
+    let fb_dep = 2
+    let fb_dynamic_includes = 3
+    let fb_rule_gen = 4
+    let rg_dir = 1
+    let rg_source_dir = 2
+    let do_rule = 1
+    let do_expanded = 2
+    let do_is_source = 3
+
+    (* google.protobuf.descriptor field numbers and enum values. *)
+    let fds_file = 1
+    let file_name = 1
+    let file_package = 2
+    let file_message_type = 4
+    let file_extension = 7
+    let file_syntax = 12
+    let msg_name = 1
+    let msg_field = 2
+    let msg_nested_type = 3
+    let fld_name = 1
+    let fld_extendee = 2
+    let fld_number = 3
+    let fld_label = 4
+    let fld_type = 5
+    let fld_type_name = 6
+    let label_optional = 1
+    let label_repeated = 3
+    let type_int64 = 3
+    let type_bool = 8
+    let type_string = 9
+    let type_message = 11
+
+    let field_descriptor ~name ~number ~label ~typ ?type_name () =
+      P.Proto.message
+        ~field:msg_field
+        (P.Proto.
+           [ string ~field:fld_name name
+           ; varint ~field:fld_number number
+           ; varint ~field:fld_label label
+           ; varint ~field:fld_type typ
+           ]
+         @
+         match type_name with
+         | Some t -> [ P.Proto.string ~field:fld_type_name t ]
+         | None -> [])
+    ;;
+
+    let string_field ~name ~number ~label () =
+      field_descriptor ~name ~number ~label ~typ:type_string ()
+    ;;
+
+    let int64_field ~name ~number ~label () =
+      field_descriptor ~name ~number ~label ~typ:type_int64 ()
+    ;;
+
+    let bool_field ~name ~number ~label () =
+      field_descriptor ~name ~number ~label ~typ:type_bool ()
+    ;;
+
+    let message_field ~name ~number ~label ~type_name () =
+      field_descriptor ~name ~number ~label ~typ:type_message ~type_name ()
+    ;;
+
+    let message ~name fields =
+      P.Proto.message
+        ~field:msg_nested_type
+        (P.Proto.string ~field:msg_name name :: fields)
+    ;;
+
+    (* A single FileDescriptorProto describing package "dune", the message
+       DuneTrackEvent (with its nested messages), and the extension of
+       TrackEvent. Trace Processor resolves [.perfetto.protos.TrackEvent] against
+       its own built-in pool, so we neither embed nor import perfetto_trace.proto. *)
+    let descriptor =
+      let dyn_dep_stage =
+        message
+          ~name:"DynDepStage"
+          [ string_field ~name:"deps" ~number:dyn_dep_stage_deps ~label:label_repeated ()
+          ]
+      in
+      let forced_by_msg =
+        message
+          ~name:"ForcedBy"
+          [ int64_field ~name:"rule" ~number:fb_rule ~label:label_optional ()
+          ; string_field ~name:"dep" ~number:fb_dep ~label:label_optional ()
+          ; string_field
+              ~name:"dynamic_includes"
+              ~number:fb_dynamic_includes
+              ~label:label_optional
+              ()
+          ; message_field
+              ~name:"rule_gen"
+              ~number:fb_rule_gen
+              ~label:label_optional
+              ~type_name:".dune.DuneTrackEvent.ForcedBy.RuleGen"
+              ()
+          ; message
+              ~name:"RuleGen"
+              [ string_field ~name:"dir" ~number:rg_dir ~label:label_optional ()
+              ; string_field
+                  ~name:"source_dir"
+                  ~number:rg_source_dir
+                  ~label:label_optional
+                  ()
+              ]
+          ]
+      in
+      let dep_outcome_msg =
+        message
+          ~name:"DepOutcome"
+          [ int64_field ~name:"rule" ~number:do_rule ~label:label_optional ()
+          ; string_field ~name:"expanded" ~number:do_expanded ~label:label_repeated ()
+          ; bool_field ~name:"is_source" ~number:do_is_source ~label:label_optional ()
+          ]
+      in
+      let dune_track_event =
+        P.Proto.message
+          ~field:file_message_type
+          [ P.Proto.string ~field:msg_name "DuneTrackEvent"
+          ; string_field ~name:"targets" ~number:targets ~label:label_repeated ()
+          ; string_field ~name:"deps" ~number:deps ~label:label_repeated ()
+          ; string_field ~name:"dep" ~number:dep ~label:label_optional ()
+          ; message_field
+              ~name:"forced_by"
+              ~number:forced_by
+              ~label:label_optional
+              ~type_name:".dune.DuneTrackEvent.ForcedBy"
+              ()
+          ; string_field
+              ~name:"rule_outcome"
+              ~number:rule_outcome
+              ~label:label_optional
+              ()
+          ; string_field
+              ~name:"process_args"
+              ~number:process_args
+              ~label:label_repeated
+              ()
+          ; message_field
+              ~name:"dyn_deps"
+              ~number:dyn_deps
+              ~label:label_repeated
+              ~type_name:".dune.DuneTrackEvent.DynDepStage"
+              ()
+          ; int64_field ~name:"rule_id" ~number:rule_id ~label:label_optional ()
+          ; message_field
+              ~name:"dep_outcome"
+              ~number:dep_outcome
+              ~label:label_optional
+              ~type_name:".dune.DuneTrackEvent.DepOutcome"
+              ()
+          ; dyn_dep_stage
+          ; forced_by_msg
+          ; dep_outcome_msg
+          ]
+      in
+      let extension =
+        P.Proto.message
+          ~field:file_extension
+          P.Proto.
+            [ string ~field:fld_name "dune"
+            ; string ~field:fld_extendee ".perfetto.protos.TrackEvent"
+            ; varint ~field:fld_number track_event_field
+            ; varint ~field:fld_label label_optional
+            ; varint ~field:fld_type type_message
+            ; string ~field:fld_type_name ".dune.DuneTrackEvent"
+            ]
+      in
+      [ P.Proto.message
+          ~field:fds_file
+          [ P.Proto.string ~field:file_name "dune_track_event.proto"
+          ; P.Proto.string ~field:file_package "dune"
+          ; dune_track_event
+          ; extension
+          ; P.Proto.string ~field:file_syntax "proto2"
+          ]
+      ]
+    ;;
+  end
+
   type t =
     { mutable declared_process : bool
     ; seen_async : (int, unit) Table.t
@@ -304,7 +518,9 @@ module Perfetto_conv = struct
     { declared_process = false
     ; seen_async = Table.create (module Int) 256
     ; names = Table.create (module Int) 2048
-    ; rev_packets = []
+    ; (* The extension descriptor must precede the events that use it, so it is
+         the first packet emitted. *)
+      rev_packets = [ P.Extension_descriptor Ext.descriptor ]
     }
   ;;
 
@@ -379,20 +595,47 @@ module Perfetto_conv = struct
     | exception _ -> s
   ;;
 
-  let resolve_ids table ids =
+  let resolve_id_strings table ids =
     List.filter_map ids ~f:(function
-      | Sexp.Atom s -> Some (P.Arg.string ~name:"" (resolve_id table s))
+      | Sexp.Atom s -> Some (resolve_id table s)
       | _ -> None)
   ;;
 
-  let forced_by_string = function
-    | Sexp.List parts ->
-      String.concat
-        ~sep:" "
-        (List.filter_map parts ~f:(function
-           | Sexp.Atom s -> Some s
-           | _ -> None))
-    | Sexp.Atom s -> s
+  (* [Graph.forced_by] as the nested ForcedBy message: exactly one field set,
+     matching the variant tag in the leading atom. *)
+  let forced_by_message = function
+    | Sexp.List (Atom "rule" :: Atom id :: _) ->
+      (match int_of_string_opt id with
+       | Some n -> [ P.Proto.varint ~field:Ext.fb_rule n ]
+       | None -> [])
+    | Sexp.List (Atom "dep" :: Atom dep :: _) -> [ P.Proto.string ~field:Ext.fb_dep dep ]
+    | Sexp.List (Atom "dynamic-includes" :: Atom path :: _) ->
+      [ P.Proto.string ~field:Ext.fb_dynamic_includes path ]
+    | Sexp.List (Atom "rule-gen" :: Atom dir :: rest) ->
+      let source_dir =
+        match rest with
+        | Sexp.Atom sd :: _ -> [ P.Proto.string ~field:Ext.rg_source_dir sd ]
+        | _ -> []
+      in
+      [ P.Proto.message
+          ~field:Ext.fb_rule_gen
+          (P.Proto.string ~field:Ext.rg_dir dir :: source_dir)
+      ]
+    | _ -> []
+  ;;
+
+  (* [Build_dep.outcome] as the nested DepOutcome message; the [expanded] case
+     carries interned dep ids, resolved here. *)
+  let dep_outcome_message t = function
+    | Sexp.List (Atom "rule" :: Atom id :: _) ->
+      (match int_of_string_opt id with
+       | Some n -> [ P.Proto.varint ~field:Ext.do_rule n ]
+       | None -> [])
+    | Sexp.List (Atom "expanded" :: ids) ->
+      List.map (resolve_id_strings t.names ids) ~f:(fun s ->
+        P.Proto.string ~field:Ext.do_expanded s)
+    | Sexp.List (Atom "is-source" :: _) -> [ P.Proto.bool ~field:Ext.do_is_source true ]
+    | _ -> []
   ;;
 
   let scalar_arg key = function
@@ -411,43 +654,62 @@ module Perfetto_conv = struct
     | v -> P.Arg.json ~name:key (Json.to_string (json_of_sexp v))
   ;;
 
-  (* Convert an event's [rest] fields to debug annotations, dropping the
-     structural keys and resolving interned id lists to names. *)
-  let event_args t rest =
-    List.filter_map rest ~f:(function
+  (* Split an event's [rest] fields into a typed [DuneTrackEvent] extension (the
+     structural graph fields, with interned ids resolved to names) and generic
+     debug annotations (everything else). Fields whose shape is unexpected fall
+     back to an annotation rather than being dropped. *)
+  let event_fields t rest =
+    let ext = ref [] in
+    let annots = ref [] in
+    let repeated ~field strings =
+      List.iter strings ~f:(fun s -> ext := P.Proto.string ~field s :: !ext)
+    in
+    List.iter rest ~f:(function
       | Sexp.List [ Atom key; v ] ->
-        (match key with
-         | "forced_by" -> Some (P.Arg.string ~name:key (forced_by_string v))
-         | "targets" | "deps" ->
-           (match v with
-            | List ids -> Some (P.Arg.array ~name:key (resolve_ids t.names ids))
-            | _ -> Some (scalar_arg key v))
-         | "dep" ->
-           (match v with
-            | Atom s -> Some (P.Arg.string ~name:key (resolve_id t.names s))
-            | _ -> Some (scalar_arg key v))
-         | "dyn_deps" ->
-           (match v with
-            | List stages ->
-              Some
-                (P.Arg.array
-                   ~name:key
-                   (List.map stages ~f:(function
-                      | Sexp.List ids -> P.Arg.array ~name:"" (resolve_ids t.names ids)
-                      | other -> scalar_arg "" other)))
-            | _ -> Some (scalar_arg key v))
-         | "process_args" ->
-           (match v with
-            | List xs ->
-              Some
-                (P.Arg.array
-                   ~name:key
-                   (List.filter_map xs ~f:(function
-                      | Sexp.Atom s -> Some (P.Arg.string ~name:"" s)
-                      | _ -> None)))
-            | _ -> Some (scalar_arg key v))
-         | _ -> Some (scalar_arg key v))
-      | _ -> None)
+        (match key, v with
+         | "targets", Sexp.List ids ->
+           repeated ~field:Ext.targets (resolve_id_strings t.names ids)
+         | "deps", Sexp.List ids ->
+           repeated ~field:Ext.deps (resolve_id_strings t.names ids)
+         | "dep", Sexp.Atom s ->
+           ext := P.Proto.string ~field:Ext.dep (resolve_id t.names s) :: !ext
+         | "rule_id", Sexp.Atom s ->
+           (match int_of_string_opt s with
+            | Some n -> ext := P.Proto.varint ~field:Ext.rule_id n :: !ext
+            | None -> annots := scalar_arg key v :: !annots)
+         | "forced_by", _ ->
+           (match forced_by_message v with
+            | [] -> annots := scalar_arg key v :: !annots
+            | fields -> ext := P.Proto.message ~field:Ext.forced_by fields :: !ext)
+         | "rule_outcome", Sexp.Atom s ->
+           ext := P.Proto.string ~field:Ext.rule_outcome s :: !ext
+         | "dep_outcome", Sexp.List _ ->
+           (match dep_outcome_message t v with
+            | [] -> annots := scalar_arg key v :: !annots
+            | fields -> ext := P.Proto.message ~field:Ext.dep_outcome fields :: !ext)
+         | "process_args", Sexp.List xs ->
+           repeated
+             ~field:Ext.process_args
+             (List.filter_map xs ~f:(function
+                | Sexp.Atom s -> Some s
+                | _ -> None))
+         | "dyn_deps", Sexp.List stages ->
+           List.iter stages ~f:(function
+             | Sexp.List ids ->
+               let deps =
+                 List.map (resolve_id_strings t.names ids) ~f:(fun s ->
+                   P.Proto.string ~field:Ext.dyn_dep_stage_deps s)
+               in
+               ext := P.Proto.message ~field:Ext.dyn_deps deps :: !ext
+             | _ -> ())
+         | _ -> annots := scalar_arg key v :: !annots)
+      | _ -> ());
+    let extension =
+      match List.rev !ext with
+      | [] -> None
+      | fields -> Some (P.Proto.message ~field:Ext.track_event_field fields)
+    in
+    extension, List.rev !annots
   ;;
 
   let add t sexp =
@@ -460,7 +722,7 @@ module Perfetto_conv = struct
       ensure_process t;
       let async_phase, rest = async_phase_of_sexp rest in
       let async_id, rest = async_id_of_sexp rest in
-      let args = event_args t rest in
+      let extension, args = event_fields t rest in
       let open P.Event.Type in
       (match async_phase, async_id with
        | Some phase, Some id ->
@@ -478,6 +740,7 @@ module Perfetto_conv = struct
                  ?name:ev_name
                  ~categories:[ cat ]
                  ~args
+                 ?extension
                  kind
                  ~track_uuid:(async_uuid id)
                  ~ts:ts_ns))
@@ -492,6 +755,7 @@ module Perfetto_conv = struct
                     ~name
                     ~categories:[ cat ]
                     ~args
+                    ?extension
                     Begin
                     ~track_uuid:main_thread_uuid
                     ~ts:ts_ns));
@@ -506,6 +770,7 @@ module Perfetto_conv = struct
                     ~name
                     ~categories:[ cat ]
                     ~args
+                    ?extension
                     Instant
                     ~track_uuid:main_thread_uuid
                     ~ts:ts_ns))))
