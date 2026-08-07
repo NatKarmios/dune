@@ -18,10 +18,10 @@ module Exec_rule : sig
     -> 'a Memo.t
 end
 
-module Dune_dyn : sig
+module Dynamic_includes : sig
   (** Trace the reading and processing of the dune file at [path], recording it
       as the [forced_by] context for any work done while [f] runs. *)
-  val start : path:Path.Source.t -> (unit -> 'a Memo.t) -> 'a Memo.t
+  val start : dune_file:Path.Source.t -> (unit -> 'a Memo.t) -> 'a Memo.t
 end
 
 module Gen_rules : sig

@@ -1250,9 +1250,19 @@ module Graph = struct
     ;;
   end
 
-  module Dune_dyn = struct
-    let start ~async_id ~start = Event.async_begin ~async_id ~name:"dune-dyn" start Graph
-    let finish ~async_id = Event.async_end ~async_id ~name:"dune-dyn" (Time.now ()) Graph
+  module Dynamic_includes = struct
+    let start ~async_id ~dune_file ~start =
+      Event.async_begin
+        ~args:[ "dune_file", Arg.source_path dune_file ]
+        ~async_id
+        ~name:"dynamic-includes"
+        start
+        Graph
+    ;;
+
+    let finish ~async_id =
+      Event.async_end ~async_id ~name:"dynamic-includes" (Time.now ()) Graph
+    ;;
   end
 
   module Gen_rules = struct

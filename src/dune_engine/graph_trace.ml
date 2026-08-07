@@ -70,7 +70,7 @@ module Forced_by = struct
   let get = Fiber.Var.get var
   let rule ~rule:{ Rule.id; _ } = Forced_by_rule id
   let dep ~dep = Forced_by_dep dep
-  let dynamic_includes ~path = Forced_by_dynamic_includes path
+  let dynamic_includes ~dune_file = Forced_by_dynamic_includes dune_file
   let rule_gen ~dir ?source_dir () = Forced_by_rule_gen { dir; source_dir }
 end
 
@@ -198,23 +198,23 @@ module Exec_rule = struct
   ;;
 end
 
-module Dune_dyn = struct
+module Dynamic_includes = struct
   (* Wraps the reading and processing of the dune file at [path]. Emits a
-     [dune-dyn-start] / [dune-dyn-finish] pair around [f] and sets [forced_by] to
-     [Dune_dyn path] so that work done while processing the file is attributed to
-     the load. *)
-  let start ~(path : Path.Source.t) (f : unit -> 'a Memo.t) : 'a Memo.t =
+     [dynamic-includes] begin/end pair around [f] and sets [forced_by] to
+     [Forced_by_dynamic_includes path] so that work done while processing the
+     file is attributed to the load. *)
+  let start ~(dune_file : Path.Source.t) (f : unit -> 'a Memo.t) : 'a Memo.t =
     if enabled Category.Graph
     then (
       let async_id = Event.gen_async_id () in
-      let new_forcer = Forced_by.dynamic_includes ~path in
+      let new_forcer = Forced_by.dynamic_includes ~dune_file in
       let start = Time.now () in
       Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-        Graph.Dune_dyn.start ~async_id ~start);
+        Graph.Dynamic_includes.start ~async_id ~dune_file ~start);
       let open Fiber.O in
       (let+ result = Forced_by.set ~new_forcer f () in
        Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-         Graph.Dune_dyn.finish ~async_id);
+         Graph.Dynamic_includes.finish ~async_id);
        result)
       |> Memo.of_reproducible_fiber)
     else f ()

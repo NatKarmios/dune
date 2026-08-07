@@ -432,7 +432,7 @@ module Eval = struct
         Memo.lazy_
         @@ fun () ->
         let dune_file = Path.Source.relative_fname eval.dir Source.Dune_file.fname in
-        Graph_trace.Dune_dyn.start ~path:dune_file
+        Graph_trace.Dynamic_includes.start ~dune_file
         @@ fun () ->
         let+ stanzas =
           let origin =

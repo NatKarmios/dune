@@ -351,8 +351,8 @@ module Event : sig
         -> t list
     end
 
-    module Dune_dyn : sig
-      val start : async_id:async_id -> start:Time.t -> t
+    module Dynamic_includes : sig
+      val start : async_id:async_id -> dune_file:Path.Source.t -> start:Time.t -> t
       val finish : async_id:async_id -> t
     end
 
