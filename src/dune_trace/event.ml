@@ -1116,7 +1116,7 @@ module Graph = struct
      time) alongside the [forced_by] arg, whose payloads are the resulting ids.
      [Forced_by_rule]'s payload is a rule id, not a path, so it is left inline. *)
   let forced_by_args ~ts = function
-    | None -> [], []
+    | None -> [], [ "forced_by", Arg.list [] ]
     | Some forced_by ->
       let tag, strings =
         match forced_by with

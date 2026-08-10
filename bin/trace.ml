@@ -319,15 +319,23 @@ module Perfetto_conv = struct
     let dep_outcome = 9
     let dyn_dep_stage_deps = 1
 
-    (* [ForcedBy] and [DepOutcome] are tagged unions where exactly one field is
-       set, mirroring [Graph.forced_by] / [Build_dep.outcome]. In real protobuf
-       these would be a [oneof], but Trace Processor's descriptor pool ignores
-       [oneof_decl] / [oneof_index] entirely (it decodes purely by field number),
-       so a [oneof] would buy nothing here; we model them as optional fields. *)
-    let fb_rule = 1
-    let fb_dep = 2
-    let fb_dynamic_includes = 3
-    let fb_gen_rules = 4
+    (* [ForcedBy] and [DepOutcome] are tagged unions where exactly one payload
+       field is set, mirroring [Graph.forced_by] / [Build_dep.outcome]. In real
+       protobuf these would be a [oneof], but Trace Processor's descriptor pool
+       ignores [oneof_decl] / [oneof_index] entirely (it decodes purely by field
+       number), so a [oneof] would buy nothing here; we model them as optional
+       fields. [ForcedBy.kind] is a required enum stating which case applies
+       (including [NONE], for work not attributed to any forcer). *)
+    let fb_kind = 1
+    let fb_rule = 2
+    let fb_dep = 3
+    let fb_dynamic_includes = 4
+    let fb_gen_rules = 5
+    let kind_none = 0
+    let kind_rule = 1
+    let kind_dep = 2
+    let kind_dynamic_includes = 3
+    let kind_gen_rules = 4
     let do_rule = 1
     let do_expanded = 2
     let do_is_source = 3
@@ -342,6 +350,11 @@ module Perfetto_conv = struct
     let msg_name = 1
     let msg_field = 2
     let msg_nested_type = 3
+    let msg_enum_type = 4
+    let enum_name = 1
+    let enum_value = 2
+    let enum_value_name = 1
+    let enum_value_number = 2
     let fld_name = 1
     let fld_extendee = 2
     let fld_number = 3
@@ -349,11 +362,13 @@ module Perfetto_conv = struct
     let fld_type = 5
     let fld_type_name = 6
     let label_optional = 1
+    let label_required = 2
     let label_repeated = 3
     let type_int64 = 3
     let type_bool = 8
     let type_string = 9
     let type_message = 11
+    let type_enum = 14
 
     let field_descriptor ~name ~number ~label ~typ ?type_name () =
       P.Proto.message
@@ -386,10 +401,28 @@ module Perfetto_conv = struct
       field_descriptor ~name ~number ~label ~typ:type_message ~type_name ()
     ;;
 
+    let enum_field ~name ~number ~label ~type_name () =
+      field_descriptor ~name ~number ~label ~typ:type_enum ~type_name ()
+    ;;
+
     let message ~name fields =
       P.Proto.message
         ~field:msg_nested_type
         (P.Proto.string ~field:msg_name name :: fields)
+    ;;
+
+    (* A nested [EnumDescriptorProto] with the given [name] and [values]
+       ([value name -> number]). *)
+    let enum ~name values =
+      P.Proto.message
+        ~field:msg_enum_type
+        (P.Proto.string ~field:enum_name name
+         :: List.map values ~f:(fun (value_name, number) ->
+           P.Proto.message
+             ~field:enum_value
+             [ P.Proto.string ~field:enum_value_name value_name
+             ; P.Proto.varint ~field:enum_value_number number
+             ]))
     ;;
 
     (* A single FileDescriptorProto describing package "dune", the message
@@ -406,7 +439,13 @@ module Perfetto_conv = struct
       let forced_by_msg =
         message
           ~name:"ForcedBy"
-          [ int64_field ~name:"rule" ~number:fb_rule ~label:label_optional ()
+          [ enum_field
+              ~name:"kind"
+              ~number:fb_kind
+              ~label:label_required
+              ~type_name:".dune.DuneTrackEvent.ForcedBy.Kind"
+              ()
+          ; int64_field ~name:"rule" ~number:fb_rule ~label:label_optional ()
           ; string_field ~name:"dep" ~number:fb_dep ~label:label_optional ()
           ; string_field
               ~name:"dynamic_includes"
@@ -414,6 +453,14 @@ module Perfetto_conv = struct
               ~label:label_optional
               ()
           ; string_field ~name:"gen_rules" ~number:fb_gen_rules ~label:label_optional ()
+          ; enum
+              ~name:"Kind"
+              [ "NONE", kind_none
+              ; "RULE", kind_rule
+              ; "DEP", kind_dep
+              ; "DYNAMIC_INCLUDES", kind_dynamic_includes
+              ; "GEN_RULES", kind_gen_rules
+              ]
           ]
       in
       let dep_outcome_msg =
@@ -585,20 +632,29 @@ module Perfetto_conv = struct
       | _ -> None)
   ;;
 
-  (* [Graph.forced_by] as the nested ForcedBy message: exactly one field set,
-     matching the variant tag in the leading atom. The dep/path payloads are
-     interned ids (the [rule] payload is a bare rule id), resolved here. *)
+  (* [Graph.forced_by] as the nested ForcedBy message: a required [kind] enum
+     plus (for all but [none]) the matching payload field. The dep/path payloads
+     are interned ids (the [rule] payload is a bare rule id), resolved here. *)
   let forced_by_message t = function
+    | Sexp.List [] -> [ P.Proto.varint ~field:Ext.fb_kind Ext.kind_none ]
     | Sexp.List (Atom "rule" :: Atom id :: _) ->
+      P.Proto.varint ~field:Ext.fb_kind Ext.kind_rule
+      ::
       (match int_of_string_opt id with
        | Some n -> [ P.Proto.varint ~field:Ext.fb_rule n ]
        | None -> [])
     | Sexp.List (Atom "dep" :: Atom dep :: _) ->
-      [ P.Proto.string ~field:Ext.fb_dep (resolve_id t.names dep) ]
+      [ P.Proto.varint ~field:Ext.fb_kind Ext.kind_dep
+      ; P.Proto.string ~field:Ext.fb_dep (resolve_id t.names dep)
+      ]
     | Sexp.List (Atom "dynamic-includes" :: Atom path :: _) ->
-      [ P.Proto.string ~field:Ext.fb_dynamic_includes (resolve_id t.names path) ]
+      [ P.Proto.varint ~field:Ext.fb_kind Ext.kind_dynamic_includes
+      ; P.Proto.string ~field:Ext.fb_dynamic_includes (resolve_id t.names path)
+      ]
     | Sexp.List (Atom "gen-rules" :: Atom dir :: _) ->
-      [ P.Proto.string ~field:Ext.fb_gen_rules (resolve_id t.names dir) ]
+      [ P.Proto.varint ~field:Ext.fb_kind Ext.kind_gen_rules
+      ; P.Proto.string ~field:Ext.fb_gen_rules (resolve_id t.names dir)
+      ]
     | _ -> []
   ;;
 
