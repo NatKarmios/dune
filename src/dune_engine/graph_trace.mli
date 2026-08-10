@@ -50,6 +50,13 @@ module Configurator : sig
   val force : (unit -> 'a Memo.t) -> 'a Memo.t
 end
 
+module Request : sig
+  (** Attribute any build forced while [f] runs to the [request] forcer — the
+      top-level build of a requested goal, so the requested targets are
+      attributed to the request. Emits no span event. *)
+  val build : (unit -> 'a Memo.t) -> 'a Memo.t
+end
+
 module Build_dep : sig
   (** Trace building a single dependency as an async span, recording it as the
       [forced_by] context while [f] runs. Each function starts the span for the

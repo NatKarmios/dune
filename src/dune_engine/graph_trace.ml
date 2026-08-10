@@ -51,6 +51,7 @@ module Forced_by = struct
     | Forced_by_gen_rules of Path.Build.t
     | Forced_by_pform of Path.Source.t
     | Forced_by_configurator
+    | Forced_by_request
 
   type t = t'
 
@@ -61,6 +62,7 @@ module Forced_by = struct
     | Forced_by_gen_rules dir -> Forced_by_gen_rules dir
     | Forced_by_pform dune_file -> Forced_by_pform dune_file
     | Forced_by_configurator -> Forced_by_configurator
+    | Forced_by_request -> Forced_by_request
   ;;
 
   (* The forcer of the current dynamic context. Each scope sets it while running
@@ -75,6 +77,7 @@ module Forced_by = struct
   let gen_rules ~dir = Forced_by_gen_rules dir
   let pform ~dune_file = Forced_by_pform dune_file
   let configurator = Forced_by_configurator
+  let request = Forced_by_request
 end
 
 module Build_dep = struct
@@ -278,6 +281,17 @@ module Configurator = struct
     if enabled Category.Graph
     then
       Forced_by.set ~new_forcer:Forced_by.configurator f () |> Memo.of_reproducible_fiber
+    else f ()
+  ;;
+end
+
+module Request = struct
+  (* Sets [forced_by] to [Forced_by_request] while [f] runs — the top-level build
+     of a requested goal — so the requested targets themselves (first forced
+     here) are attributed to the request rather than to nothing. No span event. *)
+  let build (f : unit -> 'a Memo.t) : 'a Memo.t =
+    if enabled Category.Graph
+    then Forced_by.set ~new_forcer:Forced_by.request f () |> Memo.of_reproducible_fiber
     else f ()
   ;;
 end

@@ -1320,7 +1320,8 @@ let run_build_requests ?restart_started_at ~build_started_at ?build (request : R
   let run_request goal =
     Fiber.collect_errors (fun () ->
       Memo.run_with_error_handler ~handle_error_no_raise:report_early_exn (fun () ->
-        Request.Goal.build goal |> evaluate_action_builder))
+        Graph_trace.Request.build (fun () ->
+          Request.Goal.build goal |> evaluate_action_builder)))
     >>= function
     | Ok () ->
       let+ () = finish_request goal Success in

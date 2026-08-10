@@ -298,6 +298,7 @@ module Event : sig
       | Forced_by_gen_rules of Path.Build.t
       | Forced_by_pform of Path.Source.t
       | Forced_by_configurator
+      | Forced_by_request
 
     module Build_dep : sig
       (** How building a dep resolved: it belonged to a [Dep_rule] (by id), it

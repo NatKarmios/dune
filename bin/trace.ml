@@ -339,6 +339,7 @@ module Perfetto_conv = struct
     let kind_gen_rules = 4
     let kind_pform = 5
     let kind_configurator = 6
+    let kind_request = 7
     let do_rule = 1
     let do_expanded = 2
     let do_is_source = 3
@@ -466,6 +467,7 @@ module Perfetto_conv = struct
               ; "GEN_RULES", kind_gen_rules
               ; "PFORM", kind_pform
               ; "CONFIGURATOR", kind_configurator
+              ; "REQUEST", kind_request
               ]
           ]
       in
@@ -667,6 +669,8 @@ module Perfetto_conv = struct
       ]
     | Sexp.List (Atom "configurator" :: _) ->
       [ P.Proto.varint ~field:Ext.fb_kind Ext.kind_configurator ]
+    | Sexp.List (Atom "request" :: _) ->
+      [ P.Proto.varint ~field:Ext.fb_kind Ext.kind_request ]
     | _ -> []
   ;;
 
