@@ -999,6 +999,8 @@ module No_deps = struct
   let expand_pform_no_deps t ~source pform =
     Memo.push_stack_frame
       (fun () ->
+         Dune_engine.Graph_trace.Pform.expand ~dir:t.dir ~fname:Source.Dune_file.fname
+         @@ fun () ->
          match
            match
              expand_pform_gen

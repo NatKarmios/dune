@@ -49,6 +49,8 @@ module Forced_by = struct
     | Forced_by_dep of Dep.t
     | Forced_by_dynamic_includes of Path.Source.t
     | Forced_by_gen_rules of Path.Build.t
+    | Forced_by_pform of Path.Source.t
+    | Forced_by_configurator
 
   type t = t'
 
@@ -57,6 +59,8 @@ module Forced_by = struct
     | Forced_by_dep dep -> Forced_by_dep (dep_to_string dep)
     | Forced_by_dynamic_includes path -> Forced_by_dynamic_includes path
     | Forced_by_gen_rules dir -> Forced_by_gen_rules dir
+    | Forced_by_pform dune_file -> Forced_by_pform dune_file
+    | Forced_by_configurator -> Forced_by_configurator
   ;;
 
   (* The forcer of the current dynamic context. Each scope sets it while running
@@ -69,6 +73,8 @@ module Forced_by = struct
   let dep ~dep = Forced_by_dep dep
   let dynamic_includes ~dune_file = Forced_by_dynamic_includes dune_file
   let gen_rules ~dir = Forced_by_gen_rules dir
+  let pform ~dune_file = Forced_by_pform dune_file
+  let configurator = Forced_by_configurator
 end
 
 module Build_dep = struct
@@ -241,5 +247,37 @@ module Gen_rules = struct
        result)
       |> Memo.of_reproducible_fiber)
     else f ignore
+  ;;
+end
+
+module Pform = struct
+  (* Sets [forced_by] to [Forced_by_pform dune_file] while [f] runs, so a build
+     forced by expanding a pform in [dune_file]'s stanzas (e.g. [%{read:...}] in
+     an [enabled_if], evaluated at rule-generation time) is attributed to that
+     dune file. Unlike the other wrappers this emits no span event: pform
+     expansions are far too numerous for one span each. *)
+  let expand ~(dir : Path.Build.t) ~(fname : Import.Filename.t) (f : unit -> 'a Memo.t)
+    : 'a Memo.t
+    =
+    if enabled Category.Graph
+    then (
+      match Path.Build.drop_build_context dir with
+      | None -> f ()
+      | Some src_dir ->
+        let dune_file = Path.Source.relative_fname src_dir fname in
+        Forced_by.set ~new_forcer:(Forced_by.pform ~dune_file) f ()
+        |> Memo.of_reproducible_fiber)
+    else f ()
+  ;;
+end
+
+module Configurator = struct
+  (* Sets [forced_by] to [Forced_by_configurator] while [f] runs, attributing the
+     eager build of the per-context configurator files to it. No span event. *)
+  let force (f : unit -> 'a Memo.t) : 'a Memo.t =
+    if enabled Category.Graph
+    then
+      Forced_by.set ~new_forcer:Forced_by.configurator f () |> Memo.of_reproducible_fiber
+    else f ()
   ;;
 end

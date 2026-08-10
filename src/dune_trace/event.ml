@@ -1110,6 +1110,8 @@ module Graph = struct
     | Forced_by_dep of string
     | Forced_by_dynamic_includes of Path.Source.t
     | Forced_by_gen_rules of Path.Build.t
+    | Forced_by_pform of Path.Source.t
+    | Forced_by_configurator
 
   (* The dep/path payloads of [forced_by] are interned like any other trace
      path, so this returns the intern events (for values seen for the first
@@ -1125,6 +1127,8 @@ module Graph = struct
         | Forced_by_dynamic_includes path ->
           `Paths "dynamic-includes", [ Path.Source.to_string path ]
         | Forced_by_gen_rules dir -> `Paths "gen-rules", [ Path.Build.to_string dir ]
+        | Forced_by_pform dune_file -> `Paths "pform", [ Path.Source.to_string dune_file ]
+        | Forced_by_configurator -> `Paths "configurator", []
       in
       let intern_events, ids = intern_strings ~ts strings in
       let parts =

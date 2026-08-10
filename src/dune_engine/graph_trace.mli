@@ -32,6 +32,24 @@ module Gen_rules : sig
   val start : dir:Path.Build.t -> ((Path.Source.t -> unit) -> 'a Memo.t) -> 'a Memo.t
 end
 
+module Pform : sig
+  (** Attribute any build forced while [f] runs to [dune_file] (via a
+      [forced_by] of the [pform] kind). Used to wrap no-deps pform expansion at
+      rule-generation time — e.g. [%{read:...}] in an [enabled_if] — whose
+      forced build would otherwise carry no forcer. Emits no span event. *)
+  val expand
+    :  dir:Path.Build.t
+    -> fname:Import.Filename.t
+    -> (unit -> 'a Memo.t)
+    -> 'a Memo.t
+end
+
+module Configurator : sig
+  (** Attribute any build forced while [f] runs to the [configurator] forcer —
+      the eager per-context configurator files. Emits no span event. *)
+  val force : (unit -> 'a Memo.t) -> 'a Memo.t
+end
+
 module Build_dep : sig
   (** Trace building a single dependency as an async span, recording it as the
       [forced_by] context while [f] runs. Each function starts the span for the

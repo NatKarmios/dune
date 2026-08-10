@@ -331,11 +331,14 @@ module Perfetto_conv = struct
     let fb_dep = 3
     let fb_dynamic_includes = 4
     let fb_gen_rules = 5
+    let fb_pform = 6
     let kind_none = 0
     let kind_rule = 1
     let kind_dep = 2
     let kind_dynamic_includes = 3
     let kind_gen_rules = 4
+    let kind_pform = 5
+    let kind_configurator = 6
     let do_rule = 1
     let do_expanded = 2
     let do_is_source = 3
@@ -453,6 +456,7 @@ module Perfetto_conv = struct
               ~label:label_optional
               ()
           ; string_field ~name:"gen_rules" ~number:fb_gen_rules ~label:label_optional ()
+          ; string_field ~name:"pform" ~number:fb_pform ~label:label_optional ()
           ; enum
               ~name:"Kind"
               [ "NONE", kind_none
@@ -460,6 +464,8 @@ module Perfetto_conv = struct
               ; "DEP", kind_dep
               ; "DYNAMIC_INCLUDES", kind_dynamic_includes
               ; "GEN_RULES", kind_gen_rules
+              ; "PFORM", kind_pform
+              ; "CONFIGURATOR", kind_configurator
               ]
           ]
       in
@@ -655,6 +661,12 @@ module Perfetto_conv = struct
       [ P.Proto.varint ~field:Ext.fb_kind Ext.kind_gen_rules
       ; P.Proto.string ~field:Ext.fb_gen_rules (resolve_id t.names dir)
       ]
+    | Sexp.List (Atom "pform" :: Atom dune_file :: _) ->
+      [ P.Proto.varint ~field:Ext.fb_kind Ext.kind_pform
+      ; P.Proto.string ~field:Ext.fb_pform (resolve_id t.names dune_file)
+      ]
+    | Sexp.List (Atom "configurator" :: _) ->
+      [ P.Proto.varint ~field:Ext.fb_kind Ext.kind_configurator ]
     | _ -> []
   ;;
 

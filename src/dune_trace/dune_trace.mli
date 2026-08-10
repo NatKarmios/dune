@@ -296,6 +296,8 @@ module Event : sig
       | Forced_by_dep of string
       | Forced_by_dynamic_includes of Path.Source.t
       | Forced_by_gen_rules of Path.Build.t
+      | Forced_by_pform of Path.Source.t
+      | Forced_by_configurator
 
     module Build_dep : sig
       (** How building a dep resolved: it belonged to a [Dep_rule] (by id), it
