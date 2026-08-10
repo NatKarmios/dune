@@ -317,6 +317,8 @@ module Perfetto_conv = struct
     let dyn_deps = 7
     let rule_id = 8
     let dep_outcome = 9
+    let dir = 10
+    let dune_file = 11
     let dyn_dep_stage_deps = 1
 
     (* [ForcedBy] and [DepOutcome] are tagged unions where exactly one payload
@@ -515,6 +517,8 @@ module Perfetto_conv = struct
               ~label:label_optional
               ~type_name:".dune.DuneTrackEvent.DepOutcome"
               ()
+          ; string_field ~name:"dir" ~number:dir ~label:label_optional ()
+          ; string_field ~name:"dune_file" ~number:dune_file ~label:label_optional ()
           ; dyn_dep_stage
           ; forced_by_msg
           ; dep_outcome_msg
@@ -708,12 +712,13 @@ module Perfetto_conv = struct
      structural graph fields, with interned ids resolved to names) and generic
      debug annotations (everything else). Fields whose shape is unexpected fall
      back to an annotation rather than being dropped. *)
-  let event_fields t rest =
+  let event_fields t ~name rest =
     let ext = ref [] in
     let annots = ref [] in
     let repeated ~field strings =
       List.iter strings ~f:(fun s -> ext := P.Proto.string ~field s :: !ext)
     in
+    let is_gen_rules = String.equal name "gen-rules" in
     List.iter rest ~f:(function
       | Sexp.List [ Atom key; v ] ->
         (match key, v with
@@ -723,6 +728,10 @@ module Perfetto_conv = struct
            repeated ~field:Ext.deps (resolve_id_strings t.names ids)
          | "dep", Sexp.Atom s ->
            ext := P.Proto.string ~field:Ext.dep (resolve_id t.names s) :: !ext
+         | "dir", Sexp.Atom s when is_gen_rules ->
+           ext := P.Proto.string ~field:Ext.dir s :: !ext
+         | "dune_file", Sexp.Atom s when is_gen_rules ->
+           ext := P.Proto.string ~field:Ext.dune_file s :: !ext
          | "rule_id", Sexp.Atom s ->
            (match int_of_string_opt s with
             | Some n -> ext := P.Proto.varint ~field:Ext.rule_id n :: !ext
@@ -772,7 +781,7 @@ module Perfetto_conv = struct
       ensure_process t;
       let async_phase, rest = async_phase_of_sexp rest in
       let async_id, rest = async_id_of_sexp rest in
-      let extension, args = event_fields t rest in
+      let extension, args = event_fields t ~name rest in
       let open P.Event.Type in
       (match async_phase, async_id with
        | Some phase, Some id ->
