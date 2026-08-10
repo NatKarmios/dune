@@ -325,14 +325,14 @@ module Perfetto_conv = struct
        ignores [oneof_decl] / [oneof_index] entirely (it decodes purely by field
        number), so a [oneof] would buy nothing here; we model them as optional
        fields. [ForcedBy.kind] is a required enum stating which case applies
-       (including [NONE], for work not attributed to any forcer). *)
+       (including [UNKNOWN], for work not attributed to any forcer). *)
     let fb_kind = 1
     let fb_rule = 2
     let fb_dep = 3
     let fb_dynamic_includes = 4
     let fb_gen_rules = 5
     let fb_pform = 6
-    let kind_none = 0
+    let kind_unknown = 0
     let kind_rule = 1
     let kind_dep = 2
     let kind_dynamic_includes = 3
@@ -460,7 +460,7 @@ module Perfetto_conv = struct
           ; string_field ~name:"pform" ~number:fb_pform ~label:label_optional ()
           ; enum
               ~name:"Kind"
-              [ "NONE", kind_none
+              [ "UNKNOWN", kind_unknown
               ; "RULE", kind_rule
               ; "DEP", kind_dep
               ; "DYNAMIC_INCLUDES", kind_dynamic_includes
@@ -644,7 +644,7 @@ module Perfetto_conv = struct
      plus (for all but [none]) the matching payload field. The dep/path payloads
      are interned ids (the [rule] payload is a bare rule id), resolved here. *)
   let forced_by_message t = function
-    | Sexp.List [] -> [ P.Proto.varint ~field:Ext.fb_kind Ext.kind_none ]
+    | Sexp.List [] -> [ P.Proto.varint ~field:Ext.fb_kind Ext.kind_unknown ]
     | Sexp.List (Atom "rule" :: Atom id :: _) ->
       P.Proto.varint ~field:Ext.fb_kind Ext.kind_rule
       ::
