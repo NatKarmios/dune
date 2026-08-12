@@ -18,12 +18,16 @@ let glob_predicate_string predicate =
   | None -> Dyn.to_string dyn
 ;;
 
+let path_to_string (path : Path.t) =
+  path |> Path.Expert.try_localize_external |> Path.to_string
+;;
+
 (* Render a dependency to a readable string for the trace: a file to its path,
    an alias to [dir@name], a file selector (glob) to [dir/<pattern>]. *)
 let dep_to_string (dep : Dep.t) =
   match dep with
   | Env var -> sprintf "env:%s" var
-  | File p -> Path.to_string p
+  | File p -> path_to_string p
   | Alias a ->
     sprintf
       "%s@%s"
@@ -32,7 +36,7 @@ let dep_to_string (dep : Dep.t) =
   | File_selector fs ->
     sprintf
       "%s/%s"
-      (Path.to_string (File_selector.dir fs))
+      (path_to_string (File_selector.dir fs))
       (glob_predicate_string (File_selector.predicate fs))
   | Universe -> "universe"
 ;;
@@ -145,7 +149,7 @@ module Build_dep = struct
       ~dep:(Dep.file_selector file_selector)
       ~outcome_of:(fun (files : Filename_set.t) ->
         Graph.Build_dep.Dep_expanded
-          (Filename_set.to_list files |> List.map ~f:Path.to_string))
+          (Filename_set.to_list files |> List.map ~f:path_to_string))
       f
   ;;
 end
