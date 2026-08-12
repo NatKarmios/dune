@@ -9,7 +9,13 @@
     Only the subset of the Perfetto schema needed to represent slices, instants,
     tracks, flows, and debug annotations is implemented; the protobuf wire format
     is hand-rolled (varints and length-delimited messages), so this library has
-    no dependencies. *)
+    no dependencies.
+
+    Repeated strings are interned automatically: {!to_bytes} / {!to_text} rewrite
+    event names, categories, and debug-annotation names and string values into
+    per-sequence integer ids, emitting the [InternedData] and [sequence_flags]
+    Perfetto needs to resolve them. Callers pass plain strings and need not know
+    about interning. *)
 
 (** A key/value annotation attached to an event (Perfetto's
     [DebugAnnotation]). *)
@@ -22,25 +28,11 @@ module Arg : sig
   val string : name:string -> string -> t
 
   (** A raw JSON blob (Perfetto's [legacy_json_value]), for values with no
-      natural typed representation. *)
+      natural typed representation. Not interned. *)
   val json : name:string -> string -> t
 
   val dict : name:string -> t list -> t
   val array : name:string -> t list -> t
-end
-
-(** A hand-assembled protobuf message, used for the parts of the Perfetto schema
-    that have no dedicated smart constructor: [TrackEvent] extension fields and
-    the [FileDescriptorSet] that teaches Perfetto how to decode them. A value is
-    one field ([number] paired with a typed value); a message is a [t list].
-    Repeated fields are expressed by repeating the same [field] number. *)
-module Proto : sig
-  type t
-
-  val varint : field:int -> int -> t
-  val bool : field:int -> bool -> t
-  val string : field:int -> string -> t
-  val message : field:int -> t list -> t
 end
 
 (** A track: a horizontal lane in the Perfetto UI that events are placed on.
@@ -70,15 +62,11 @@ module Event : sig
 
   type t
 
-  (** [extension] is a message spliced onto the [TrackEvent] at its own field
-      number (see {!Proto.message}); Perfetto decodes it via a matching
-      {!Extension_descriptor} packet. *)
   val create
     :  ?name:string
     -> ?categories:string list
     -> ?args:Arg.t list
     -> ?flow_ids:int list
-    -> ?extension:Proto.t
     -> Type.t
     -> track_uuid:int
     -> ts:int (** nanoseconds *)
@@ -88,10 +76,6 @@ end
 type packet =
   | Track_descriptor of Track.t
   | Track_event of Event.t
-  | Extension_descriptor of Proto.t list
-  (** The fields of a [FileDescriptorSet] describing the schema of the
-          {!Event} [extension]s, so Perfetto can decode them. Emit once, before
-          the events that use it. *)
 
 (** Serialise to the binary protobuf format read by [ui.perfetto.dev]. *)
 val to_bytes : packet list -> string

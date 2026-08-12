@@ -32,47 +32,77 @@ Graph async spans become slices (begin/end pairs on their own tracks):
   yes
   $ dune trace perfetto --text | grep -q 'type: TYPE_SLICE_END' && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "exec-rule"' && echo yes
-  yes
 
 Each async span gets its own track, named by the event's category:
 
   $ dune trace perfetto --text | grep -q 'name: "graph"' && echo yes
   yes
 
-The structural graph fields (targets, deps, forced_by, ...) are promoted from
-generic debug annotations to a typed `TrackEvent` extension. A descriptor packet
-embeds a `FileDescriptorSet` naming the schema, `dune.DuneTrackEvent` extending
-`perfetto.protos.TrackEvent`, so Trace Processor decodes them into its args table
-(e.g. `EXTRACT_ARG(arg_set_id, 'dune.targets')`):
+Repeated strings are interned. Event names and categories are referenced from
+track events by id (`name_iid` / `category_iids`), and defined once in an
+`interned_data` table:
 
-  $ dune trace perfetto --text | grep -q 'field_1: "DuneTrackEvent"' && echo yes
+  $ dune trace perfetto --text | grep -q 'name_iid:' && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'field_2: ".perfetto.protos.TrackEvent"' && echo yes
+  $ dune trace perfetto --text | grep -q 'category_iids:' && echo yes
   yes
-
-Tagged unions are modelled as nested messages rather than flattened strings:
-`forced_by` is a `ForcedBy`, and build-dep's `dep_outcome` is a `DepOutcome`
-(distinct from exec-rule's plain `rule_outcome` string). Exec-rule's `rule_id` is
-also included:
-
-  $ dune trace perfetto --text | grep -q 'field_1: "ForcedBy"' && echo yes
+  $ dune trace perfetto --text | grep -q 'event_names {' && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'field_1: "DepOutcome"' && echo yes
-  yes
-  $ dune trace perfetto --text | grep -q 'field_1: "rule_id"' && echo yes
+  $ dune trace perfetto --text | grep -q 'name: "exec-rule"' && echo yes
   yes
 
-The extension is spliced onto each graph event at field 9910, with interned
-target and dep ids resolved to readable paths (targets = field 1, dep =
-field 3):
+The structural graph fields become debug annotations, with their interned target
+and dep ids resolved to readable paths. The annotation names and string values
+are themselves interned (`name_iid` / `string_value_iid`):
 
-  $ dune trace perfetto --text | grep -q 'field_9910 {' && echo yes
+  $ dune trace perfetto --text | grep -q 'debug_annotation_names {' && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'field_1: "_build/default/out.txt"' && echo yes
+  $ dune trace perfetto --text | grep -q 'debug_annotation_string_values {' && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'field_3: "_build/default/dep.txt"' && echo yes
+  $ dune trace perfetto --text | grep -q 'name: "targets"' && echo yes
   yes
+  $ dune trace perfetto --text | grep -q 'name: "dep"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'name: "rule_id"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'str: "_build/default/out.txt"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'str: "_build/default/dep.txt"' && echo yes
+  yes
+
+Recognised structural fields are grouped under a "dune" dict (surfacing as e.g.
+`debug.dune.targets` in Trace Processor), while unrecognised fields (such as the
+`config` event's own `build_dir`) stay at the top level:
+
+  $ dune trace perfetto --text | grep -q 'name: "dune"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'name: "build_dir"' && echo yes
+  yes
+
+Tagged unions become nested dicts: `forced_by` carries a `kind` tag plus its
+payload, and build-dep's `dep_outcome` is distinct from exec-rule's plain
+`rule_outcome` string:
+
+  $ dune trace perfetto --text | grep -q 'name: "forced_by"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'name: "kind"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'name: "dep_outcome"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'name: "rule_outcome"' && echo yes
+  yes
+
+Interning is incremental over one sequence: the first participating packet clears
+prior state (`sequence_flags: 3`), the rest only announce they need it
+(`sequence_flags: 2`), and each string is defined exactly once however many
+events reference it:
+
+  $ dune trace perfetto --text | grep -c 'sequence_flags: 3'
+  1
+  $ dune trace perfetto --text | grep -c 'str: "_build/default/out.txt"'
+  1
+  $ dune trace perfetto --text | grep -c 'str: "_build/default/dep.txt"'
+  1
 
 Without `--text` it writes the binary protobuf. The output is a stream of
 length-delimited Trace.packet fields, so it begins with the tag for field 1,
