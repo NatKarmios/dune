@@ -6,11 +6,13 @@ share the span's "async_id" and are told apart by their "async_phase", and
 both carry the "rule_id". The end event carries the execution outcome, the
 resolved "deps", and the "dyn_deps" (one dep list per dynamic-deps stage).
 
-An executed rule additionally wraps the execution of its action proper (real
-work, bounded by -j) in an "exec-rule-action" begin/end pair. It shares the
-rule's "async_id", nesting inside the rule's span, and also carries the
-"rule_id"; the two spans are told apart by their name. Cache hits execute no
-action and so have no such span.
+An executed rule additionally wraps the execution of its action proper in an
+"exec-rule-action" begin/end pair. It shares the rule's "async_id", nesting
+inside the rule's span, and also carries the "rule_id"; the two spans are
+told apart by their name. Cache hits execute no action and so have no such
+span. The span is not bounded by -j: that throttle is acquired per-process,
+below this hook, so the span includes scheduler queueing and any number of
+actions can be open at once.
 
 Targets and dependencies are rendered to strings and interned to integer ids:
 the first time some are seen an "intern" event records their id -> value

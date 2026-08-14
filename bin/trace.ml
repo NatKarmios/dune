@@ -384,12 +384,10 @@ end
 (* Perfetto native-protobuf export. Consumes the same csexp event stream as
    [json_of_event], mapping each graph async span to a pair of lifecycle
    instants (or, for a cache hit / source dep, a single collapsed instant) on
-   a fixed track shared by its kind -- except exec-rule-action spans, which
-   are true duration slices on a small pool of reused lane tracks -- flat
-   complete/instant events to slices/instants on a main thread track, and the
-   intern tables to readable target/dep names. It also accumulates the graph
-   blob (see [Graph_blob]) for exec-rule/build-dep spans, flushed once at the
-   end in [to_packets]. *)
+   a fixed track shared by its kind, flat complete/instant events to
+   slices/instants on a main thread track, and the intern tables to readable
+   target/dep names. It also accumulates the graph blob (see [Graph_blob]) for
+   exec-rule/build-dep spans, flushed once at the end in [to_packets]. *)
 module Perfetto_conv = struct
   module P = Dune_perfetto
 
@@ -397,11 +395,11 @@ module Perfetto_conv = struct
      track, and one fixed track per graph-span kind, all children of the
      process. Per-span tracks are gone -- unrelated spans of the same kind now
      share one track as instants, which have no nesting semantics (see
-     doc/dev/trace-graph-perfetto.md, phase 2). Exec-rule-action spans are the
-     exception: they are true duration slices, so they get a small pool of
-     lane tracks (uuids from [first_action_lane_uuid] up), reused strictly
-     after a span ends; all lanes share one name so the UI merges them (see
-     phase 3). *)
+     doc/dev/trace-graph-perfetto.md, phase 2). Exec-rule-action spans are no
+     exception: phase 3 rendered them as duration slices on a pool of reused
+     lane tracks, on the assumption that concurrency was bounded by -j, but
+     the -j throttle is acquired per-process below the span (see phase 6), so
+     the pool grew with the ready set. They are lifecycle instants too. *)
   let process_uuid = 1
   let main_thread_uuid = 2
   let graph_uuid = 3
@@ -409,7 +407,7 @@ module Perfetto_conv = struct
   let build_dep_uuid = 5
   let gen_rules_uuid = 6
   let dynamic_includes_uuid = 7
-  let first_action_lane_uuid = 8
+  let exec_rule_action_uuid = 8
 
   (* The begin-side fields of an open exec-rule span, buffered under its
      [async_id] (with its begin timestamp, to compute [dur_ns] and place the
@@ -447,6 +445,17 @@ module Perfetto_conv = struct
     ; dynamic_includes_flow_id : int
     }
 
+  (* Likewise for an open exec-rule-action span. It has no flow id of its
+     own: it shares its rule's [async_id] and runs strictly inside the rule's
+     span, so the rule's begin is still buffered when the action begins and
+     its flow id can be borrowed then, chaining the action into the rule's
+     lifecycle. [] if the rule's begin was malformed and thus not buffered. *)
+  type action_begin =
+    { action_rule_id : string
+    ; action_begin_ts : int
+    ; action_flow_ids : int list
+    }
+
   type t =
     { mutable declared_process : bool
     ; declared_tracks : (int, unit) Table.t
@@ -461,17 +470,14 @@ module Perfetto_conv = struct
     ; open_deps : (int, dep_begin) Table.t
     ; open_gen_rules : (int, gen_rules_begin) Table.t
     ; open_dynamic_includes : (int, dynamic_includes_begin) Table.t
-    ; (* Open exec-rule-action slices: async_id (shared with the rule's
-         lifecycle events) -> the lane uuid the Begin was pushed on. *)
-      open_actions : (int, int) Table.t
-    ; (* Lane uuids whose slice has ended, available for reuse. *)
-      mutable free_action_lanes : int list
-    ; mutable next_action_lane : int
+    ; (* Keyed by the async_id the action shares with its rule; the rule's own
+         begin lives in [open_rules] under the same key. *)
+      open_actions : (int, action_begin) Table.t
     ; (* One fresh flow id per buffered span begin, chaining its lifecycle
-         events (start instant, action Begin slice, finish instant) in
-         timestamp order (see doc/dev/trace-graph-perfetto.md, phase 4).
-         Collapsed instants carry no flow, so a cache-hit/source span's id is
-         simply never emitted. *)
+         events (start instant, the action's two instants, finish instant) in
+         timestamp order (see doc/dev/trace-graph-perfetto.md, phases 4 and
+         6). Collapsed instants carry no flow, so a cache-hit/source span's id
+         is simply never emitted. *)
       mutable next_flow_id : int
     ; mutable rev_rule_lines : string list
     ; mutable rev_dep_lines : string list
@@ -488,8 +494,6 @@ module Perfetto_conv = struct
     ; open_gen_rules = Table.create (module Int) 64
     ; open_dynamic_includes = Table.create (module Int) 64
     ; open_actions = Table.create (module Int) 64
-    ; free_action_lanes = []
-    ; next_action_lane = first_action_lane_uuid
     ; next_flow_id = 1
     ; rev_rule_lines = []
     ; rev_dep_lines = []
@@ -652,6 +656,36 @@ module Perfetto_conv = struct
               @ rule_id_arg b.rule_id))
   ;;
 
+  (* The action span's start instant, also used on its own by the EOF flush
+     (an action left open by a crash/interrupt). *)
+  let push_action_start t ~async_id (b : action_begin) =
+    push_instant
+      t
+      ~uuid:exec_rule_action_uuid
+      ~track_name:"exec-rule-action"
+      ~name:"exec-rule-action-start"
+      ~ts:b.action_begin_ts
+      ~flow_ids:b.action_flow_ids
+      ~args:(dune_args (async_id_arg async_id :: rule_id_arg b.action_rule_id))
+  ;;
+
+  (* exec-rule-action has no collapsed form: an action span means the rule
+     actually executed, which is real work and comparatively rare. *)
+  let emit_action_end t ~async_id ~ts (b : action_begin) =
+    push_action_start t ~async_id b;
+    push_instant
+      t
+      ~uuid:exec_rule_action_uuid
+      ~track_name:"exec-rule-action"
+      ~name:"exec-rule-action-finish"
+      ~ts
+      ~flow_ids:b.action_flow_ids
+      ~args:
+        (dune_args
+           ([ async_id_arg async_id; P.Arg.int ~name:"dur_ns" (ts - b.action_begin_ts) ]
+            @ rule_id_arg b.action_rule_id))
+  ;;
+
   (* Likewise for a build-dep span: collapsed to [build-dep-resolved] when the
      dep is a source file, otherwise a [build-dep-start]/[build-dep-finish]
      pair. [dep_outcome] is the end event's raw [Build_dep.outcome] sexp. *)
@@ -796,50 +830,25 @@ module Perfetto_conv = struct
            }
        | _ -> ())
     | "exec-rule-action" ->
-      (* Unlike the other kinds, an action span is a true duration slice, so
-         nothing needs buffering: push the Begin now, on a lane popped from
-         the free list (reused strictly after its previous slice ended, so
-         stack nesting on a shared lane is impossible), remembering the lane
-         for the matching end. *)
-      let lane =
-        match t.free_action_lanes with
-        | lane :: rest ->
-          t.free_action_lanes <- rest;
-          lane
-        | [] ->
-          let lane = t.next_action_lane in
-          t.next_action_lane <- lane + 1;
-          lane
-      in
-      Table.set t.open_actions async_id lane;
-      ensure_track t lane ~name:"exec-rule-action";
-      let rule_id_args =
-        match field "rule_id" rest with
-        | Some (Atom id) -> rule_id_arg id
-        | _ -> []
-      in
-      (* The action shares its rule's [async_id] and always begins after the
-         rule's begin, so the rule's lifecycle flow id is sitting in
-         [open_rules]; carrying it here chains, in timestamp order,
-         exec-rule-start -> this slice -> exec-rule-finish. An action also
-         proves the rule executed, so the id is guaranteed to surface on the
-         start/finish instants (never on a collapsed one). *)
-      let flow_ids =
-        match Table.find t.open_rules async_id with
-        | Some (b : rule_begin) -> [ b.flow_id ]
-        | None -> []
-      in
-      push
-        t
-        (P.Track_event
-           (P.Event.create
-              ~name:"exec-rule-action"
-              ~categories:[ "graph" ]
-              ~args:(dune_args (async_id_arg async_id :: rule_id_args))
-              ~flow_ids
-              P.Event.Type.Begin
-              ~track_uuid:lane
-              ~ts))
+      (match field "rule_id" rest with
+       | Some (Atom rule_id) ->
+         (* The action shares its rule's [async_id] and always begins after
+            the rule's begin, so the rule's lifecycle flow id is sitting in
+            [open_rules]; borrowing it here chains, in timestamp order,
+            exec-rule-start -> exec-rule-action-start ->
+            exec-rule-action-finish -> exec-rule-finish. An action also proves
+            the rule executed, so the id is guaranteed to surface on the
+            rule's start/finish instants (never on a collapsed one). *)
+         let action_flow_ids =
+           match Table.find t.open_rules async_id with
+           | Some (b : rule_begin) -> [ b.flow_id ]
+           | None -> []
+         in
+         Table.set
+           t.open_actions
+           async_id
+           { action_rule_id = rule_id; action_begin_ts = ts; action_flow_ids }
+       | _ -> ())
     | "build-dep" ->
       (match field "dep" rest with
        | Some (Atom dep) ->
@@ -928,10 +937,9 @@ module Perfetto_conv = struct
     | "exec-rule-action" ->
       (match Table.find t.open_actions async_id with
        | None -> ()
-       | Some lane ->
+       | Some b ->
          Table.remove t.open_actions async_id;
-         t.free_action_lanes <- lane :: t.free_action_lanes;
-         push t (P.Track_event (P.Event.create P.Event.Type.End ~track_uuid:lane ~ts)))
+         emit_action_end t ~async_id ~ts b)
     | "build-dep" ->
       (match Table.find t.open_deps async_id with
        | None -> ()
@@ -1016,9 +1024,9 @@ module Perfetto_conv = struct
      track (see doc/dev/trace-graph-perfetto.md, phase 2): the finish never
      arrives, so there is nothing to pair with. Sorted by [async_id] like the
      blob flush above, for the same determinism reason. They keep their flow
-     id: for a rule that crashed mid-action, the action's Begin slice already
-     carries it, so the start -> action arrow survives (elsewhere the id ends
-     up on a single event, which draws nothing). *)
+     id: for a rule that crashed mid-action, the action's own flushed start
+     instant carries it too, so the start -> action-start arrow survives
+     (elsewhere the id ends up on a single event, which draws nothing). *)
   let flush_open_start_instants t =
     let sorted tbl =
       Table.to_list tbl |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
@@ -1074,7 +1082,9 @@ module Perfetto_conv = struct
             (dune_args
                [ P.Arg.string ~name:"dune_file" b.dynamic_includes_dune_file
                ; async_id_arg async_id
-               ]))
+               ]));
+    List.iter (sorted t.open_actions) ~f:(fun (async_id, (b : action_begin)) ->
+      push_action_start t ~async_id b)
   ;;
 
   (* The intern table as "id\tvalue" lines, sorted by id: the only place in

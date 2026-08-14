@@ -1,8 +1,8 @@
 # Graph trace: Perfetto export redesign
 
-Status: **implemented** (all phases). This document started as the working
-plan, executed phase by phase over multiple agent sessions, and now serves
-as the reference for the converter's design and plugin-facing schema. The
+Status: phases 1–6 **implemented**. This document started as the working
+plan, executed phase by phase over multiple agent sessions, and serves as
+the reference for the converter's design and plugin-facing schema. The
 "Plugin-facing schema (v1)" section is the contract; bump `version` on
 breaking change.
 
@@ -34,7 +34,7 @@ fan-in 50 (~100k dep edges):
 All changes are in the **converter** (`bin/trace.ml`). The on-disk csexp
 format keeps its per-event begin/end pairs — that is what makes it
 crash-safe and streamable — except for one dune-side addition
-(`exec-rule-action`, phase 4). Decisions:
+(`exec-rule-action`, phase 3). Decisions:
 
 1. **Graph data moves out of slice debug annotations into a chunked blob**
    emitted as instants on a dedicated `dune-graph` track, one string arg
@@ -53,29 +53,31 @@ crash-safe and streamable — except for one dune-side addition
    source-file deps) — the overwhelming majority of events in incremental
    monorepo builds.
 5. **One flow per span chains its lifecycle**: for executed rules,
-   `exec-rule-start` → `exec-rule-action` slice → `exec-rule-finish`
-   (a flow id's consecutive appearances link in timestamp order, so a
-   single id per span produces exactly this chain); for other
-   non-collapsed spans, start → finish. Collapsed instants carry no flow.
-   Measured cost on a cold build (worst case — nothing collapses): ~6.5%
-   of total wire output; incremental builds pay proportionally less.
-   Flows for graph *edges* are rejected: fan-out would need one id per
-   edge patched onto already-emitted forcer instants; the blob carries
-   those edges instead.
-6. **New dune-side `exec-rule-action` span** wrapping only the action
-   execution (Step IV in `build_system.ml`, `execute_action_for_rule`),
-   i.e. real work, bounded by `-j`. The converter renders these as true
-   duration slices on a small pool of lanes (track uuids reused after a
-   span ends; all lanes share one name so the UI merges them). This gives
-   a worker-occupancy timeline. Cache-hit rules have no action, so the
-   noise problem solves itself structurally.
+   `exec-rule-start` → `exec-rule-action-start` → `exec-rule-action-finish`
+   → `exec-rule-finish` (a flow id's consecutive appearances link in
+   timestamp order, so a single id per rule produces exactly this chain;
+   the middle two are skipped when no action ran); for other non-collapsed
+   spans, start → finish. Collapsed instants carry no flow. Measured cost
+   on a cold build (worst case — nothing collapses): ~6.5% of total wire
+   output; incremental builds pay proportionally less. Flows for graph
+   *edges* are rejected: fan-out would need one id per edge patched onto
+   already-emitted forcer instants; the blob carries those edges instead.
+6. **New dune-side `exec-rule-action` span** wrapping the action execution
+   (Step IV in `build_system.ml`, `execute_action_for_rule`), sharing the
+   rule's `async_id`, rendered as start/finish instants on its own track
+   like the other kinds (phase 6; phase 3 originally rendered pooled
+   duration lanes). Note its extent is *not* bounded by `-j`: the `-j`
+   throttle is per-process (`Scheduler.with_job_slot`, acquired inside
+   `Process.run`, below this hook), so the span includes scheduler
+   queueing and peak concurrency is the ready set — the observation that
+   forced the phase 6 revision. Cache-hit rules have no action span.
 
 Perfetto ground rules this design leans on:
 
 - Slices on one track have stack semantics; any temporal containment
-  nests. Only share a track between spans when nesting is intended
-  (`exec-rule-action` and things genuinely inside it) or impossible
-  (pooled lanes reused strictly after end; instants).
+  nests. Only share a track between spans when nesting is intended or
+  impossible (instants have no extent, so any number share a track
+  safely — after phase 6 every graph track is instants-only).
 - Same-named child tracks of a process are merged and lane-packed by the
   UI; distinctly-named tracks each get a row. Identity therefore lives in
   args, not track names.
@@ -96,7 +98,7 @@ Track layout (uuids are converter-internal; names are the contract):
 | `gen-rules`      | child of process        | gen-rules lifecycle instants      |
 | `dynamic-includes` | child of process      | dynamic-includes lifecycle instants |
 | `dune-graph`     | child of process        | graph blob chunks (instants)      |
-| `exec-rule-action` (×N lanes) | children of process | action duration slices (phase 4) |
+| `exec-rule-action` | child of process      | action lifecycle instants         |
 
 Converter mechanics: buffer begin events in a table keyed by `async_id`
 (begin timestamp + parsed args); emit nothing at begin time. At the
@@ -133,11 +135,17 @@ On track `build-dep`:
 - `build-dep-resolved`: collapsed form used when the dep is a source
   file; union of the above args.
 
-On the pooled `exec-rule-action` lanes (executed rules only):
+On track `exec-rule-action` (executed rules only):
 
-- `exec-rule-action`: true duration slice (Begin/End); `rule_id` (int),
-  `async_id` (int, **same value as the rule's lifecycle instants** — the
-  join key between an action slice and its rule).
+- `exec-rule-action-start`: `rule_id` (int), `async_id` (int, **same
+  value as the rule's lifecycle instants** — the join key between an
+  action and its rule).
+- `exec-rule-action-finish`: `rule_id`, `async_id`, `dur_ns` (int).
+
+Note the action interval includes scheduler queueing (`-j` is enforced
+per-process, below this span), so it measures "action in flight", not
+worker occupancy; the `process` events carry the throttled run intervals
+and per-process `queued` durations.
 
 On tracks `gen-rules` / `dynamic-includes`:
 
@@ -150,12 +158,12 @@ On tracks `gen-rules` / `dynamic-includes`:
 expansion lists **no longer appear on slices**; they are in the blob.
 
 A fresh `flow_ids` value per non-collapsed span chains its lifecycle:
-`exec-rule-start` → `exec-rule-action` slice (executed rules only) →
-`exec-rule-finish`; plain start → finish for `build-dep`, `gen-rules`,
-and `dynamic-includes` (and for exec-rule spans with no action slice).
-Collapsed instants carry no flow. The flow is a stock-UI affordance; the
-plugin pairs via `async_id`/`rule_id` args and should not depend on
-flows.
+`exec-rule-start` → `exec-rule-action-start` → `exec-rule-action-finish`
+→ `exec-rule-finish` for executed rules; plain start → finish for
+`build-dep`, `gen-rules`, and `dynamic-includes` (and for exec-rule
+spans where no action ran). Collapsed instants carry no flow. The flow
+is a stock-UI affordance; the plugin pairs via `async_id`/`rule_id`
+args and should not depend on flows.
 
 ### Graph blob
 
@@ -319,6 +327,9 @@ Implementation notes / deviations from the schema as originally drafted:
 
 ### Phase 3 — `exec-rule-action` duration spans (dune-side + converter) — **implemented**
 
+*Converter rendering (pooled duration lanes) superseded by phase 6; the
+dune-side events are unchanged.*
+
 - Dune side: new begin/end async event pair in
   `src/dune_trace/event.ml`/`.mli` (`Graph.Exec_rule_action`), **sharing
   the exec-rule span's `async_id`** so the pair nests inside the rule's
@@ -357,6 +368,7 @@ Implementation notes / deviations from the schema as originally drafted:
   as an open `SLICE_BEGIN` on its lane — trace_processor renders unterminated
   slices to the end of the trace, which is the honest reading — rather than
   synthesised into a `-start` instant like the instant-pair kinds.
+  *(Superseded by phase 6: it is a bare `-start` instant like the rest now.)*
 - If the action fails (build error), neither the action end nor the rule's
   end is emitted; both surface via the unfinished-span paths above.
 - `perfetto.t`'s lane assertions are invariants (begins = ends; lanes <
@@ -372,6 +384,10 @@ Implementation notes / deviations from the schema as originally drafted:
   phase's extra output exposed.
 
 ### Phase 4 — lifecycle flows — **implemented**
+
+*The action's participation in the chain is revised by phase 6 (two
+instants instead of one Begin slice); the flow-id bookkeeping below is
+otherwise unchanged.*
 
 - Allocate a fresh flow id per non-collapsed span when its begin is
   buffered; set `flow_ids` on the start instant, the matching
@@ -406,7 +422,9 @@ Implementation notes / deviations from the schema as originally drafted:
   unnecessary: the flow id lives in the buffered `rule_begin`, and the
   action Begin always arrives while the rule's begin is still buffered
   (they share `async_id`), so the Begin picks the id up by table lookup at
-  the time it is pushed.
+  the time it is pushed. (Phase 6 keeps this: the action's begin is now
+  buffered rather than pushed, and borrows the rule's flow id at that same
+  point, for both of its instants.)
 - EOF-flushed bare `-start` instants (crash/interrupt) keep their flow id:
   for a rule that crashed mid-action, the action's Begin slice already
   carries the id, so the start → action arrow survives. Elsewhere the id
@@ -438,8 +456,10 @@ Implementation notes / deviations from the schema as originally drafted:
   "Motivation":
   - Track descriptors: **7** (was 4008) — process, main thread, the
     per-kind instant tracks, one `exec-rule-action` lane (the
-    sliding-window topology serialises the build, so one lane suffices;
-    lane count is bounded by `-j`, not rule count), and `dune-graph`.
+    sliding-window topology serialises the build, so one lane sufficed;
+    this measurement's "lane count is bounded by `-j`" reading was
+    **wrong** — see phase 6 — the serial topology masked it), and
+    `dune-graph`.
   - Perfetto pb: 1.51 MB (was 1.41 MB). The slight growth is honest
     accounting: the pb now additionally carries the graph blob (~620 KB
     of it — `graph-rules` ~503 KB, `graph-dict` ~79 KB, `graph-deps`
@@ -463,6 +483,67 @@ Implementation notes / deviations from the schema as originally drafted:
   - Splitting exec-rule lifecycle into demand vs. execute on the dune
     side.
 
+### Phase 6 — `exec-rule-action` as lifecycle instants (converter-only) — **implemented**
+
+Motivation: real traces show far more concurrent action slices than `-j`.
+The `-j` throttle is acquired per-process by `Scheduler.with_job_slot`
+inside `Process.run_internal` (`src/dune_engine/process.ml`, where the
+process event's `queued` duration is measured), i.e. *below* the
+`execute_action_for_rule` hook — so an action span opens as soon as the
+rule's deps are ready and includes scheduler queue wait. Peak open
+actions is the ready set, not the worker pool; the phase 3 lane pool is
+therefore unbounded in practice, partially resurrecting the
+track-explosion problem it was meant to avoid.
+
+Changes (dune-side events are untouched):
+
+- Drop the lane pool and free-list entirely. Declare a single
+  `exec-rule-action` child track (lazily, like the other kinds).
+- Buffer action begins in the same (name, `async_id`)-keyed pending table
+  as the other kinds; at action end, emit `exec-rule-action-start` (at
+  the begin timestamp) and `exec-rule-action-finish` (with `dur_ns`)
+  instants, args per the schema section. No collapse: executed actions
+  are real work and comparatively few.
+- Flows: apply the rule's flow id (already looked up via the shared
+  `async_id`) to both action instants, yielding the four-hop chain
+  `exec-rule-start` → `exec-rule-action-start` →
+  `exec-rule-action-finish` → `exec-rule-finish`; timestamp-ordered
+  chaining produces exactly this path. Rules with no action keep the
+  two-hop chain.
+- EOF flush: an action begin left unmatched becomes a bare
+  `exec-rule-action-start` instant, uniform with the other kinds
+  (supersedes phase 3's open-`SLICE_BEGIN` behavior; the flow id on it
+  still draws the start → action-start arrow).
+- Tests (`perfetto.t`): replace the lane-reuse invariants with: no
+  `SLICE_BEGIN`/`SLICE_END` on graph tracks at all (everything is
+  `TYPE_INSTANT` now); exactly one `exec-rule-action` track; the same
+  flow id on all four chain points for an executed rule; `dur_ns` on
+  action finishes.
+
+Implementation notes / deviations from the schema as originally drafted:
+
+- The pending table stays per-kind (`open_actions`, keyed by `async_id`)
+  rather than becoming one table keyed by *(name, `async_id`)*: the
+  converter never had the single keyed-by-pair table phase 3 described, and
+  a separate table per kind already distinguishes the action from the rule
+  it shares an id with.
+- The action's begin no longer allocates a flow id of its own (phase 3's
+  Begin slice did not either); it borrows the rule's from `open_rules` when
+  it is buffered, and both instants carry it. A malformed rule begin (never
+  buffered) leaves the action's instants without a flow, mirroring how the
+  other kinds' malformed begins drop out of the lifecycle.
+- Track count on `perfetto.t`'s project is now an exact assertion (7) rather
+  than the phase 3 arithmetic over the lane count, since it no longer varies
+  with action concurrency.
+- `perfetto.t` grew an `event_args` helper (resolves each track_event to
+  "<name> <type> <arg names>" against the two intern tables, matching
+  `name_iid:` by indentation as `flow_events` does) so the action instants'
+  arg sets are asserted exactly, rather than by greps for individual names
+  that could match any other event.
+- `graph-events.t`'s prose claimed the action span is "bounded by -j"; that
+  was the phase 3 misreading this phase corrects, so it is fixed there too
+  (the dune-side events themselves are unchanged).
+
 ## Verification checklist (carry across sessions)
 
 - [x] `debug.dune.*` is the actual args-table key prefix (phase 1, checked
@@ -474,3 +555,6 @@ Implementation notes / deviations from the schema as originally drafted:
 - [x] Monorepo-scale re-measurement after phase 2: track count, pb size,
       and args-table row count vs. the baseline numbers above (phase 5;
       results recorded in the phase 5 notes).
+- [ ] Four-hop flow chain draws as expected in the UI, and a
+      parallelism-heavy trace (wide ready set) no longer multiplies
+      `exec-rule-action` tracks (phase 6).

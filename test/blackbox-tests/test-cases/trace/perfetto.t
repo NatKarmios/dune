@@ -21,10 +21,6 @@ events onto a main thread track.
   >  (action (copy /etc/hosts copy.txt)))
   > EOF
 
-(copy.txt depends on out.txt, which depends on dep.txt, so the three project
-actions execute strictly one after another -- guaranteeing the
-exec-rule-action lane reuse asserted below.)
-
   $ DUNE_TRACE=+graph dune build out.txt copy.txt
 
 The `--text` flag emits a human-readable, protobuf-text-format-style dump.
@@ -49,21 +45,19 @@ Flat events with a duration (e.g. spawned processes) still become slices
   $ grep -q 'type: TYPE_SLICE_END' dump.textpb && echo yes
   yes
 
-Graph async spans (exec-rule, build-dep, gen-rules, dynamic-includes) become
-instants instead: unrelated spans of the same kind share one fixed track, so
-track descriptors no longer scale with the number of spans. This project only
-exercises three of the four kinds (no subdirectory means no dynamic-includes
-span), for six fixed tracks -- the process, the main thread, the graph blob,
-and the three kind tracks -- plus one lane track per concurrently-executing
-action (see the exec-rule-action section below; the lane name also appears
-once as an interned event name, hence the arithmetic):
+Graph async spans (exec-rule, exec-rule-action, build-dep, gen-rules,
+dynamic-includes) become instants instead: unrelated spans of the same kind
+share one fixed track, so track descriptors no longer scale with the number
+of spans. This project only exercises four of the five kinds (no subdirectory
+means no dynamic-includes span), for seven tracks in total -- the process, the
+main thread, the graph blob, and the four kind tracks:
 
-  $ tracks=$(grep -c 'track_descriptor {' dump.textpb)
-  $ lanes=$(($(grep -c 'name: "exec-rule-action"' dump.textpb) - 1))
-  $ test "$tracks" -eq $((6 + lanes)) && echo yes
-  yes
+  $ grep -c 'track_descriptor {' dump.textpb
+  7
   $ grep -q 'name: "exec-rule"' dump.textpb && echo yes
   yes
+  $ grep -c 'name: "exec-rule-action"' dump.textpb
+  1
   $ grep -q 'name: "build-dep"' dump.textpb && echo yes
   yes
   $ grep -q 'name: "gen-rules"' dump.textpb && echo yes
@@ -91,6 +85,24 @@ finish instant carrying `dur_ns`, paired by a shared `async_id`:
   $ grep -q 'name: "dur_ns"' dump.textpb && echo yes
   yes
 
+The graph tracks carry nothing but instants -- the slices seen above are all
+on the main thread track. (Anything else would nest: slices on one track have
+stack semantics, and unrelated spans of the same kind overlap freely.)
+
+  $ graph_slice_count() {
+  >   awk '
+  >     $1 == "track_descriptor" { td = 1 }
+  >     td && $1 == "uuid:" { uuid = $2 }
+  >     td && $1 == "name:" && $2 ~ /^"(exec-rule|exec-rule-action|build-dep|gen-rules|dynamic-includes|dune-graph)"$/ { graph[uuid] = 1 }
+  >     td && $1 == "}" { td = 0 }
+  >     /^    type: / { type = $2 }
+  >     /^    track_uuid: / { if (($2 in graph) && type ~ /SLICE/) n++ }
+  >     END { print n + 0 }
+  >   ' dump.textpb
+  > }
+  $ graph_slice_count
+  0
+
 `copy.txt` depends on `/etc/hosts`, a path outside the workspace entirely
 rather than a project source file (which would resolve through dune's
 implicit copy-to-build-dir rule, i.e. the "rule" outcome, not this one) --
@@ -103,39 +115,59 @@ instead of a start/finish pair:
   $ grep -q 'str: "is-source"' dump.textpb && echo yes
   yes
 
-An executed rule's action execution (its exec-rule-action span, sharing the
-rule's async_id) is real work bounded by -j, so it stays a true duration
-slice rather than becoming instants. Slices are rendered on a pool of lane
-tracks that all share the name "exec-rule-action" (so the UI merges them
-into one group), and a lane is reused only after its previous slice ends, so
-the pool stays as small as the build's actual action concurrency. Besides
-the three project rules, a fresh build also executes internal rules (the
-context's configurator probes, the copy-to-build-dir rules for the .src
-sources), and those may overlap, so exact counts aren't stable; assert the
-invariants instead: Begin/End events balance on the lanes, and there are
-fewer lanes than slices -- the three project actions are serialized by their
-dep chain, so at least one lane must have been reused:
+An executed rule's action execution is its own span (exec-rule-action,
+sharing the rule's async_id), and gets a lifecycle pair like the other kinds.
+It is not bounded by -j -- the throttle is acquired per-process, below this
+span -- so an arbitrary number of actions can be open at once, and instants
+are what lets them all share one track (see doc/dev/trace-graph-perfetto.md,
+phase 6).
 
-  $ action_lane_stats() {
+Names and annotation names are both interned, in separate tables, and a name
+is defined by its first user (i.e. after the event referencing it), so
+resolving an event to "<name> <type> <arg names>" means buffering to END and
+matching each `name_iid:` by its exact indentation: 4 spaces for the event's
+own name, 8 for a `dune` dict entry (6 is the dict itself):
+
+  $ event_args() {
   >   awk '
-  >     $1 == "track_descriptor" { td = 1; uuid = "" }
-  >     td && $1 == "uuid:" { uuid = $2 }
-  >     td && /name: "exec-rule-action"/ && !(uuid in lane) { lane[uuid] = 1; lanes++ }
-  >     td && $1 == "}" { td = 0 }
-  >     $1 == "type:" { type = $2 }
-  >     $1 == "track_uuid:" && ($2 in lane) {
-  >       if (type == "TYPE_SLICE_BEGIN") begins++
-  >       if (type == "TYPE_SLICE_END") ends++
+  >     /^ *event_names \{/ { tbl = "e"; next }
+  >     /^ *debug_annotation_names \{/ { tbl = "d"; next }
+  >     tbl != "" && $1 == "iid:" { iid = $2; next }
+  >     tbl != "" && $1 == "name:" {
+  >       gsub(/"/, "", $2)
+  >       if (tbl == "e") ename[iid] = $2; else dname[iid] = $2
+  >       tbl = ""; next
   >     }
-  >     END { printf "lanes=%d; begins=%d; ends=%d\n", lanes, begins, ends }
+  >     /^  track_event \{/ { n++ }
+  >     /^    type: / { etype[n] = $2 }
+  >     /^    name_iid: / { eid[n] = $2 }
+  >     /^        name_iid: / { args[n] = args[n] "," $2 }
+  >     END {
+  >       for (i = 1; i <= n; i++) {
+  >         s = ""
+  >         m = split(args[i], a, ",")
+  >         for (j = 2; j <= m; j++) s = s (j == 2 ? "" : ",") dname[a[j]]
+  >         print ename[eid[i]], etype[i], s
+  >       }
+  >     }
   >   ' dump.textpb
   > }
-  $ eval "$(action_lane_stats)"
-  $ test "$begins" -gt 0 && echo yes
-  yes
-  $ test "$begins" -eq "$ends" && echo yes
-  yes
-  $ test "$lanes" -gt 0 && test "$lanes" -lt "$begins" && echo yes
+
+Both action instants are on the graph track as instants, joined to their rule
+by the `async_id` they share with it, and the finish carries `dur_ns`:
+
+  $ event_args | sort -u | grep '^exec-rule-action-'
+  exec-rule-action-finish TYPE_INSTANT async_id,dur_ns,rule_id
+  exec-rule-action-start TYPE_INSTANT async_id,rule_id
+
+Starts and finishes balance (the exact count isn't stable: besides the three
+project rules, a fresh build also executes internal rules such as the
+context's configurator probes and the copy-to-build-dir rules for the .src
+sources):
+
+  $ starts=$(event_args | grep -c '^exec-rule-action-start ')
+  $ finishes=$(event_args | grep -c '^exec-rule-action-finish ')
+  $ test "$starts" -gt 0 && test "$starts" -eq "$finishes" && echo yes
   yes
 
 A fresh flow id per non-collapsed span chains its lifecycle events (see
@@ -160,20 +192,21 @@ so the event-level fields are matched by their exact 4-space indentation:
   >   ' dump.textpb
   > }
 
-For an executed rule, one id links exec-rule-start, the exec-rule-action
-Begin slice, and exec-rule-finish -- flow chaining follows timestamp order,
-so the UI draws start -> action -> finish. (Packet order differs: the action
-Begin is pushed when the action begins, the start/finish instants only once
-the rule's end arrives.) Pick an action's flow id and list every event
+For an executed rule, one id links all four of its lifecycle instants -- flow
+chaining follows timestamp order, so the UI draws
+start -> action-start -> action-finish -> finish. (Packet order differs: the
+action's instants are pushed when the action ends, the rule's only once the
+rule's own end arrives.) Pick an action's flow id and list every event
 carrying it:
 
-  $ action_flow=$(flow_events | awk '$2 == "exec-rule-action" { print $1; exit }')
+  $ action_flow=$(flow_events | awk '$2 == "exec-rule-action-start" { print $1; exit }')
   $ flow_events | awk -v id="$action_flow" '$1 == id { print $2, $3 }'
-  exec-rule-action TYPE_SLICE_BEGIN
+  exec-rule-action-start TYPE_INSTANT
+  exec-rule-action-finish TYPE_INSTANT
   exec-rule-start TYPE_INSTANT
   exec-rule-finish TYPE_INSTANT
 
-For the other non-collapsed kinds there is no action slice, so the flow is a
+For the other non-collapsed kinds there is no action span, so the flow is a
 plain start -> finish pair (build-dep shown; gen-rules and dynamic-includes
 work identically):
 
@@ -430,8 +463,10 @@ spans still resolve to rules, so those flows remain):
   $ flow_events | grep -q build-dep-start && echo yes
   yes
 
-Cache hits execute no action, so this trace has no exec-rule-action slices --
-and no lane tracks either:
+Cache hits execute no action, so this trace has no exec-rule-action instants
+-- and, the track being declared lazily, no exec-rule-action track either:
 
   $ grep -q 'name: "exec-rule-action"' dump.textpb && echo yes
+  [1]
+  $ event_args | grep -q '^exec-rule-action-' && echo yes
   [1]
