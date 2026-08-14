@@ -474,20 +474,38 @@ module Perfetto_conv = struct
   (* Classify one [key = value] field as a recognised structural graph field
      (with its interned ids resolved to readable names) or an unrecognised one.
      Recognised keys with an unexpected shape fall back to a scalar but stay
-     recognised. *)
-  let classify_field t ~is_gen_rules key v =
+     recognised. [name] (the event name) disambiguates keys that mean
+     different things on different events: "exec-rule"'s "dir"/"target_files"/
+     "target_dirs" are interned, while "gen-rules"'s "dir"/"dune_file" and the
+     "targets" event's own "targets" (see [Event.resolve_targets]) are plain,
+     uninterned strings. *)
+  let classify_field t ~name key v =
     let fallback = function
       | Some arg -> arg
       | None -> scalar_arg key v
     in
     match key, v with
-    | "targets", Sexp.List ids ->
-      `Dune (string_array ~name:key (resolve_id_strings t.names ids))
+    | "dir", Sexp.Atom s when String.equal name "exec-rule" ->
+      `Dune (P.Arg.string ~name:key (resolve_id t.names s))
+    | ("target_files" | "target_dirs"), Sexp.List ids when String.equal name "exec-rule"
+      -> `Dune (string_array ~name:key (resolve_id_strings t.names ids))
     | "deps", Sexp.List ids ->
       `Dune (string_array ~name:key (resolve_id_strings t.names ids))
     | "dep", Sexp.Atom s -> `Dune (P.Arg.string ~name:key (resolve_id t.names s))
-    | "dir", Sexp.Atom s when is_gen_rules -> `Dune (P.Arg.string ~name:key s)
-    | "dune_file", Sexp.Atom s when is_gen_rules -> `Dune (P.Arg.string ~name:key s)
+    | "dir", Sexp.Atom s when String.equal name "gen-rules" ->
+      `Dune (P.Arg.string ~name:key s)
+    | "dune_file", Sexp.Atom s when String.equal name "gen-rules" ->
+      `Dune (P.Arg.string ~name:key s)
+    | "targets", Sexp.List xs when String.equal name "targets" ->
+      (* [Event.resolve_targets]'s own "targets" arg: the user-requested build
+         targets, rendered as real paths (unlike graph events' interned ids),
+         so no id resolution is needed. *)
+      `Dune
+        (string_array
+           ~name:key
+           (List.filter_map xs ~f:(function
+              | Sexp.Atom s -> Some s
+              | _ -> None)))
     | "rule_id", Sexp.Atom s ->
       `Dune (fallback (Option.map (int_of_string_opt s) ~f:(P.Arg.int ~name:key)))
     | "forced_by", _ -> `Dune (fallback (forced_by_arg t key v))
@@ -513,14 +531,13 @@ module Perfetto_conv = struct
 
   (* Map an event's [rest] fields to Perfetto debug annotations. Recognised
      structural fields are grouped under a "dune" dict (surfacing as e.g.
-     [debug.dune.targets] in Trace Processor); unrecognised fields are left at
-     the top level. Their strings are interned by [Dune_perfetto] when
+     [debug.dune.target_files] in Trace Processor); unrecognised fields are
+     left at the top level. Their strings are interned by [Dune_perfetto] when
      serialising. *)
   let event_fields t ~name rest =
-    let is_gen_rules = String.equal name "gen-rules" in
     let dune, top =
       List.filter_map rest ~f:(function
-        | Sexp.List [ Atom key; v ] -> Some (classify_field t ~is_gen_rules key v)
+        | Sexp.List [ Atom key; v ] -> Some (classify_field t ~name key v)
         | _ -> None)
       |> List.partition_map ~f:(function
         | `Dune arg -> Left arg

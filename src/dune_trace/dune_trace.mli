@@ -328,16 +328,19 @@ module Event : sig
       (* The events are Chrome nestable-async events keyed by [async_id]:
          [start] emits a begin and [finish] the matching end. Both also carry
          [rule_id] (the rule's own identity, distinct from the async chain's
-         id). [finish] additionally carries the resolved [deps] and the dynamic
-         dependencies [dyn_deps] (one dep list per dynamic-deps stage). Both
-         [start] and [finish] intern targets/deps and so return their event
-         preceded by an [intern] event for ids seen for the first time; emit the
-         whole list (e.g. with [emit_all]) so ids are declared before
-         referenced. *)
+         id). [start] additionally carries the targets' [dir] and the bare
+         names of the target [files] and [dirs] within it. [finish]
+         additionally carries the resolved [deps] and the dynamic dependencies
+         [dyn_deps] (one dep list per dynamic-deps stage). Both [start] and
+         [finish] intern targets/deps and so return their event preceded by an
+         [intern] event for ids seen for the first time; emit the whole list
+         (e.g. with [emit_all]) so ids are declared before referenced. *)
       val start
         :  async_id:async_id
         -> rule_id:int
-        -> targets:string list
+        -> dir:string
+        -> target_files:string list
+        -> target_dirs:string list
         -> forced_by:forced_by option
         -> start:Time.t
         -> t list

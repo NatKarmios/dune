@@ -31,6 +31,7 @@ module Glob : sig
 
   val repr : t Repr.t
   val to_dyn : t -> Dyn.t
+  val to_string : t -> string
   val test : t -> standard:t -> string -> bool
   val of_glob : Dune_glob.V1.t -> t
 

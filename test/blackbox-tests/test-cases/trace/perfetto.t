@@ -59,20 +59,24 @@ are themselves interned (`name_iid` / `string_value_iid`):
   yes
   $ dune trace perfetto --text | grep -q 'debug_annotation_string_values {' && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "targets"' && echo yes
+  $ dune trace perfetto --text | grep -q 'name: "dir"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'name: "target_files"' && echo yes
   yes
   $ dune trace perfetto --text | grep -q 'name: "dep"' && echo yes
   yes
   $ dune trace perfetto --text | grep -q 'name: "rule_id"' && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'str: "_build/default/out.txt"' && echo yes
+  $ dune trace perfetto --text | grep -q 'str: "_build/default"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'str: "out.txt"' && echo yes
   yes
   $ dune trace perfetto --text | grep -q 'str: "_build/default/dep.txt"' && echo yes
   yes
 
 Recognised structural fields are grouped under a "dune" dict (surfacing as e.g.
-`debug.dune.targets` in Trace Processor), while unrecognised fields (such as the
-`config` event's own `build_dir`) stay at the top level:
+`debug.dune.target_files` in Trace Processor), while unrecognised fields (such
+as the `config` event's own `build_dir`) stay at the top level:
 
   $ dune trace perfetto --text | grep -q 'name: "dune"' && echo yes
   yes
@@ -99,7 +103,9 @@ events reference it:
 
   $ dune trace perfetto --text | grep -c 'sequence_flags: 3'
   1
-  $ dune trace perfetto --text | grep -c 'str: "_build/default/out.txt"'
+  $ dune trace perfetto --text | grep -c 'str: "_build/default"$'
+  1
+  $ dune trace perfetto --text | grep -c 'str: "out.txt"'
   1
   $ dune trace perfetto --text | grep -c 'str: "_build/default/dep.txt"'
   1

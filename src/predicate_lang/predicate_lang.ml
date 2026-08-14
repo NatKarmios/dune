@@ -232,6 +232,11 @@ module Glob = struct
       | Glob g -> Dyn.variant "Glob" [ Glob.to_dyn (unproxy g) ]
     ;;
 
+    let to_string = function
+      | Literal s -> s
+      | Glob g -> Glob.to_string (unproxy g)
+    ;;
+
     let encode t =
       Dune_sexp.atom_or_quoted_string
       @@
@@ -276,6 +281,25 @@ module Glob = struct
   let repr = repr Element.repr
   let to_dyn t = to_dyn Element.to_dyn t
   let test (t : t) ~standard elem = test t ~standard ~test:Element.test elem
+
+  (* Rendered in the predicate language's own syntax, so the string reads back
+     the way it was written in the dune file. [True] is every file name, i.e.
+     [*]; [False] is the empty disjunction. *)
+  let rec to_string (t : t) =
+    match t with
+    | Element e -> Element.to_string e
+    | True -> "*"
+    | False -> "(or)"
+    | Standard -> ":standard"
+    | Not t -> sprintf "(not %s)" (to_string t)
+    | Or ts -> parens "or" ts
+    | And ts -> parens "and" ts
+
+  and parens name ts =
+    List.map ts ~f:(fun t -> " " ^ to_string t)
+    |> String.concat ~sep:""
+    |> sprintf "(%s%s)" name
+  ;;
 
   let of_glob g =
     let proxy =

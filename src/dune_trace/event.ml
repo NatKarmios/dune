@@ -1099,6 +1099,18 @@ module Graph = struct
     intern_events, ids
   ;;
 
+  (* Intern a single [s], returning its id and (for a value seen for the first
+     time) the intern event recording it. *)
+  let intern_string ~ts s =
+    let id, freshness = Intern.intern intern s in
+    let events =
+      match freshness with
+      | `New -> [ intern_event ~ts [ id, s ] ]
+      | `Existing -> []
+    in
+    events, id
+  ;;
+
   let ids_arg key ids =
     match ids with
     | [] -> []
@@ -1157,12 +1169,8 @@ module Graph = struct
        whole list (e.g. with [emit_all]). *)
     let start ~async_id ~forced_by ~dep =
       let ts = Time.now () in
-      let intern_events, ids = intern_strings ~ts [ dep ] in
-      let dep_arg =
-        match ids with
-        | [ id ] -> [ "dep", Arg.int id ]
-        | _ -> []
-      in
+      let intern_events, dep_id = intern_string ~ts dep in
+      let dep_arg = [ "dep", Arg.int dep_id ] in
       let forced_by_intern_events, forced_by_args = forced_by_args ~ts forced_by in
       let args = dep_arg @ forced_by_args in
       intern_events
@@ -1202,13 +1210,22 @@ module Graph = struct
       | Shared_cache_hit -> "shared-cache-hit"
     ;;
 
-    let start ~async_id ~rule_id ~targets ~forced_by ~start =
-      let intern_events, target_ids = intern_strings ~ts:start targets in
+    let start ~async_id ~rule_id ~dir ~target_files ~target_dirs ~forced_by ~start =
+      let dir_intern_events, dir_id = intern_string ~ts:start dir in
+      let file_intern_events, file_ids = intern_strings ~ts:start target_files in
+      let dir_target_intern_events, dir_target_ids =
+        intern_strings ~ts:start target_dirs
+      in
       let forced_by_intern_events, forced_by_args = forced_by_args ~ts:start forced_by in
       let args =
-        (("rule_id", Arg.int rule_id) :: forced_by_args) @ ids_arg "targets" target_ids
+        (("rule_id", Arg.int rule_id) :: forced_by_args)
+        @ [ "dir", Arg.int dir_id ]
+        @ ids_arg "target_files" file_ids
+        @ ids_arg "target_dirs" dir_target_ids
       in
-      intern_events
+      dir_intern_events
+      @ file_intern_events
+      @ dir_target_intern_events
       @ forced_by_intern_events
       @ [ Event.async_begin ~args ~async_id ~name:"exec-rule" start Graph ]
     ;;

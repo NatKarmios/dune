@@ -2,22 +2,6 @@ open Stdune
 open Dune_trace
 module Graph = Event.Graph
 
-(* A single glob predicate renders (via [Predicate_lang.Glob.to_dyn]) as nested
-   ["Glob"]/["Element"] wrappers around the pattern string; peel them to recover
-   the bare pattern (e.g. ["*.src"]). Anything else (unions, negations, ...) has
-   no single pattern, so fall back to the dyn rendering. *)
-let glob_predicate_string predicate =
-  let rec pattern : Dyn.t -> string option = function
-    | String s -> Some s
-    | Variant (("Glob" | "Element"), [ inner ]) -> pattern inner
-    | _ -> None
-  in
-  let dyn = Predicate_lang.Glob.to_dyn predicate in
-  match pattern dyn with
-  | Some s -> s
-  | None -> Dyn.to_string dyn
-;;
-
 let path_to_string (path : Path.t) =
   path |> Path.Expert.try_localize_external |> Path.to_string
 ;;
@@ -37,14 +21,8 @@ let dep_to_string (dep : Dep.t) =
     sprintf
       "%s/%s"
       (path_to_string (File_selector.dir fs))
-      (glob_predicate_string (File_selector.predicate fs))
+      (Predicate_lang.Glob.to_string (File_selector.predicate fs))
   | Universe -> "universe"
-;;
-
-(* A rule's targets (files and directories), each rendered as its path string. *)
-let target_strings { Import.Targets.Validated.root; files; dirs } =
-  let path name = Path.Build.relative_fname root name |> Path.Build.to_string in
-  Filename.Set.to_list_map files ~f:path @ Filename.Set.to_list_map dirs ~f:path
 ;;
 
 module Forced_by = struct
@@ -161,13 +139,20 @@ module Exec_rule = struct
     | Shared_cache_hit
 
   module Emit = struct
-    let start ~rule:{ Rule.id; targets; _ } ~async_id ~forced_by ~start =
+    let start
+          ~rule:{ Rule.id; targets = { Import.Targets.Validated.root; files; dirs }; _ }
+          ~async_id
+          ~forced_by
+          ~start
+      =
       Dune_trace.emit_all ~buffered:true Category.Graph
       @@ fun () ->
       Graph.Exec_rule.start
         ~async_id
         ~rule_id:(Rule.Id.to_int id)
-        ~targets:(target_strings targets)
+        ~dir:(Path.Build.to_string root)
+        ~target_files:(Filename.Set.to_list files |> Filename.L.to_string)
+        ~target_dirs:(Filename.Set.to_list dirs |> Filename.L.to_string)
         ~forced_by:(Option.map forced_by ~f:Forced_by.conv)
         ~start
     ;;
