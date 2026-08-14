@@ -1,10 +1,10 @@
 # Graph trace: Perfetto export redesign
 
-Status: phases 1-4 implemented; phase 5 planned. This document is the
-working plan; it is intended to be executed phase by phase over multiple
-agent sessions. Each phase is independently committable and must pass
-`dune build @check @fmt @runtest` (scope test runs to
-`test/blackbox-tests/test-cases/trace/` during development).
+Status: **implemented** (all phases). This document started as the working
+plan, executed phase by phase over multiple agent sessions, and now serves
+as the reference for the converter's design and plugin-facing schema. The
+"Plugin-facing schema (v1)" section is the contract; bump `version` on
+breaking change.
 
 ## Motivation
 
@@ -420,12 +420,39 @@ Implementation notes / deviations from the schema as originally drafted:
   exact indentation. An earlier draft of the test ignored the second trap
   and passed on one trace by iid coincidence while failing on another.
 
-### Phase 5 — docs and follow-ups
+### Phase 5 — docs and follow-ups — **implemented**
 
 - Update the trace section of `doc/hacking.rst` and this document to
   "implemented" status; record any schema deviations discovered in
   phases 1–4 (the plugin schema section above is the contract — bump
   `version` on breaking change).
+- Done: `doc/hacking.rst` (trace section) and
+  `doc/advanced/profiling-dune.rst` now document `dune trace perfetto`
+  and the `graph` category, pointing here for the plugin schema. Schema
+  deviations were recorded incrementally in each phase's implementation
+  notes above — none require a `version` bump; the wire format matches
+  the v1 schema as annotated.
+- Monorepo-scale re-measurement (last checklist item) — synthetic
+  2000-rule project, fan-in 50 (sliding window over the previous 50
+  targets, ~99k dep edges), cold build, measured against the baseline in
+  "Motivation":
+  - Track descriptors: **7** (was 4008) — process, main thread, the
+    per-kind instant tracks, one `exec-rule-action` lane (the
+    sliding-window topology serialises the build, so one lane suffices;
+    lane count is bounded by `-j`, not rule count), and `dune-graph`.
+  - Perfetto pb: 1.51 MB (was 1.41 MB). The slight growth is honest
+    accounting: the pb now additionally carries the graph blob (~620 KB
+    of it — `graph-rules` ~503 KB, `graph-dict` ~79 KB, `graph-deps`
+    ~41 KB, one chunk each), lifecycle flows, and 2000 action slices.
+    Bytes were never the UI bottleneck; rows were.
+  - Args-table load: ~14k debug-annotation blocks / ~30k annotation
+    values total (small ints and interned strings), versus one-plus rows
+    per dep-array element before (~100k+ for the dep arrays alone). Dep
+    edges now cost SQL rows only via 3 blob strings.
+  - csexp: 2.60 MB (was 2.24 MB; growth is the phase-3
+    `exec-rule-action` begin/end pairs). gzip: csexp 271 KB (~10:1),
+    pb 315 KB (~4.8:1 — the pb's varint-heavy encoding compresses less
+    than the textual csexp, but is already ~40% smaller uncompressed).
 - Known limitations / candidates deliberately out of scope:
   - Converter buffers all packets in memory; multi-GB csexp inputs may
     need a streaming writer eventually.
@@ -444,5 +471,6 @@ Implementation notes / deviations from the schema as originally drafted:
       merged group (phase 3).
 - [x] Flow arrows render on instant endpoints in the UI, and the
       start → action → finish chain draws as expected (phase 4).
-- [ ] Monorepo-scale re-measurement after phase 2: track count, pb size,
-      and args-table row count vs. the baseline numbers above.
+- [x] Monorepo-scale re-measurement after phase 2: track count, pb size,
+      and args-table row count vs. the baseline numbers above (phase 5;
+      results recorded in the phase 5 notes).

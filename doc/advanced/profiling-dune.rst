@@ -16,4 +16,14 @@ to Chrome trace format:
 
    $ dune trace cat --chrome-trace > trace.json
 
+For Perfetto specifically, ``dune trace perfetto`` produces its native
+protobuf format instead. Enabling the ``graph`` trace category additionally
+records build-graph data (rule executions, dependency edges) in a form the
+Perfetto UI can explore at scale:
+
+.. code:: console
+
+   $ DUNE_TRACE=+graph dune build
+   $ dune trace perfetto -o trace.pb
+
 .. _Perfetto: https://ui.perfetto.dev/

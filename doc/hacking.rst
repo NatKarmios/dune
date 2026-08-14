@@ -189,6 +189,20 @@ replace timing values that vary between runs:
 
    $ dune trace cat | jq 'include "dune"; select(.cat == "cram") | .args | redactCommandTimes'
 
+``dune trace perfetto`` converts the trace to Perfetto's native protobuf
+format (``--text`` emits a human-readable dump, useful in cram tests). When
+the ``graph`` category is enabled, build-graph spans become lifecycle
+instants on per-kind tracks, action executions become duration slices, and
+the graph structure itself (targets, dependency edges, forced-by
+attribution) is packed into a chunked blob on a ``dune-graph`` track. The
+converter's output schema — the contract consumed by the Perfetto UI
+plugin — is specified in ``doc/dev/trace-graph-perfetto.md``.
+
+.. code:: console
+
+   $ DUNE_TRACE=+graph dune build
+   $ dune trace perfetto -o trace.pb
+
 .. seealso:: :doc:`advanced/profiling-dune` for loading traces into chrome://tracing
 
 Guidelines
