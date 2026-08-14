@@ -88,7 +88,7 @@ Perfetto ground rules this design leans on:
 Track layout (uuids are converter-internal; names are the contract):
 
 | track            | kind                    | contents                          |
-|------------------|-------------------------|------------------------------------|
+|------------------|-------------------------|-----------------------------------|
 | `dune`           | process                 | —                                 |
 | `main`           | thread                  | flat complete/instant events (unchanged) |
 | `exec-rule`      | child of process        | exec-rule lifecycle instants      |
@@ -254,7 +254,7 @@ Implementation notes / deviations from the schema as originally drafted:
   ids actually referenced by `graph-rules`/`graph-deps` (harmless: `intern`
   events cover only strings the graph category actually used).
 
-### Phase 2 — spans → instants, per-kind tracks, arg slimming
+### Phase 2 — spans → instants, per-kind tracks, arg slimming — **implemented**
 
 - Replace the per-span `ensure_async_track` scheme with fixed per-kind
   tracks; delete `seen_async`/`async_uuid` as such.
@@ -270,6 +270,46 @@ Implementation notes / deviations from the schema as originally drafted:
   instants; deps no longer appear as slice annotations.
 - Note: the JSON/Chrome outputs of `dune trace cat` are untouched (they
   render the csexp events directly).
+
+Implementation notes / deviations from the schema as originally drafted:
+
+- Per-kind tracks are still declared lazily (the first time an instant is
+  pushed to them), matching phase 1's `dune-graph` track: a trace with no
+  `dynamic-includes` spans (e.g. a project with no subdirectories) simply
+  never declares that track, rather than always declaring all four.
+- gen-rules/dynamic-includes finish instants do not repeat their start-only
+  identifying field (`dir` / `dune_file` respectively): only `dune_file` (for
+  gen-rules, when known), `dur_ns`, and `async_id` are on the finish. This
+  mirrors exec-rule's asymmetry (`dir` is start-only there too) and was a
+  reading of the schema table's compressed "start / finish" row, which did
+  not spell out which fields belong to which side.
+- `build-dep-finish`/`-resolved` always carry `outcome_kind`
+  (`"rule"|"expanded"|"is-source"`) rather than only conditionally
+  including it; `rule_id` is additionally present when the kind is
+  `"rule"`. The schema's phrasing ("the outcome kind: `rule_id` (int) when
+  the dep resolved to a rule; `outcome_kind` (...)") was ambiguous between
+  this and an either/or; the implemented form keeps the arg set
+  self-describing without a join.
+- `exec-rule`'s `rule_id`/`build-dep`'s `rule_id` (when present) degrade to
+  omitting the arg (rather than a `"?"` placeholder) if the underlying
+  atom fails to parse as an int; this can only happen on a malformed trace
+  and mirrors other defensive fallbacks in the converter.
+- A missing `dep_outcome` on a `build-dep` end (malformed trace) degrades
+  to `outcome_kind: "?"` and still emits the start/finish pair, mirroring
+  `exec-rule`'s `rule_outcome` fallback. An earlier version of this dropped
+  the perfetto instants silently in this case while still emitting a `"?"`
+  graph-blob line, so the blob and the slice track could disagree on
+  whether the span existed; caught in review before landing.
+- `perfetto.t`'s test project depends on `/etc/hosts` (outside the
+  workspace, following the precedent in
+  `melange/emit-with-runtime-deps-edge-cases.t`) to exercise
+  `build-dep-resolved`'s `is-source` collapse — depending on a project
+  source file resolves to the `"rule"` outcome instead, via dune's
+  implicit copy-to-build-dir rule, which surprised an earlier draft of
+  this test that tried a plain in-project source dep. `/etc/hosts`-style
+  paths are Unix-only; this is fine here since blackbox cram tests are not
+  run on Windows CI (`test/blackbox-tests/test-cases/dune`'s
+  `runtest-windows` alias only allowlists two unrelated tests).
 
 ### Phase 3 — `exec-rule-action` duration spans (dune-side + converter)
 
