@@ -440,7 +440,7 @@ Implementation notes / deviations from the schema as originally drafted:
 
 - [x] `debug.dune.*` is the actual args-table key prefix (phase 1, checked
       in trace_processor).
-- [ ] UI lane-packs the same-named `exec-rule-action` tracks into one
+- [x] UI lane-packs the same-named `exec-rule-action` tracks into one
       merged group (phase 3).
 - [x] Flow arrows render on instant endpoints in the UI, and the
       start → action → finish chain draws as expected (phase 4).
