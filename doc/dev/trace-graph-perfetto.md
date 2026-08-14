@@ -442,7 +442,7 @@ Implementation notes / deviations from the schema as originally drafted:
       in trace_processor).
 - [ ] UI lane-packs the same-named `exec-rule-action` tracks into one
       merged group (phase 3).
-- [ ] Flow arrows render on instant endpoints in the UI, and the
+- [x] Flow arrows render on instant endpoints in the UI, and the
       start → action → finish chain draws as expected (phase 4).
 - [ ] Monorepo-scale re-measurement after phase 2: track count, pb size,
       and args-table row count vs. the baseline numbers above.
