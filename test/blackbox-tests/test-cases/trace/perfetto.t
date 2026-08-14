@@ -138,6 +138,56 @@ dep chain, so at least one lane must have been reused:
   $ test "$lanes" -gt 0 && test "$lanes" -lt "$begins" && echo yes
   yes
 
+A fresh flow id per non-collapsed span chains its lifecycle events (see
+doc/dev/trace-graph-perfetto.md, phase 4). Event names are interned, so
+resolving `name_iid` against the `event_names` table gives, for each
+`flow_ids` occurrence, "<flow id> <event name> <event type>". Two parsing
+subtleties: a name is interned by its first user, i.e. its `interned_data`
+definition sits *after* the track_event referencing it in the same packet, so
+the flow records are buffered and their names resolved only at END; and debug
+annotations carry `name_iid:` lines of their own (a different intern table),
+so the event-level fields are matched by their exact 4-space indentation:
+
+  $ flow_events() {
+  >   awk '
+  >     /^ *event_names {/ { en = 1 }
+  >     en && $1 == "iid:" { iid = $2 }
+  >     en && $1 == "name:" { gsub(/"/, "", $2); name[iid] = $2; en = 0 }
+  >     /^    type: / { type = $2; niid = "" }
+  >     /^    name_iid: / { niid = $2 }
+  >     /^    flow_ids: / { n++; fid[n] = $2; fniid[n] = niid; ftype[n] = type }
+  >     END { for (i = 1; i <= n; i++) print fid[i], name[fniid[i]], ftype[i] }
+  >   ' dump.textpb
+  > }
+
+For an executed rule, one id links exec-rule-start, the exec-rule-action
+Begin slice, and exec-rule-finish -- flow chaining follows timestamp order,
+so the UI draws start -> action -> finish. (Packet order differs: the action
+Begin is pushed when the action begins, the start/finish instants only once
+the rule's end arrives.) Pick an action's flow id and list every event
+carrying it:
+
+  $ action_flow=$(flow_events | awk '$2 == "exec-rule-action" { print $1; exit }')
+  $ flow_events | awk -v id="$action_flow" '$1 == id { print $2, $3 }'
+  exec-rule-action TYPE_SLICE_BEGIN
+  exec-rule-start TYPE_INSTANT
+  exec-rule-finish TYPE_INSTANT
+
+For the other non-collapsed kinds there is no action slice, so the flow is a
+plain start -> finish pair (build-dep shown; gen-rules and dynamic-includes
+work identically):
+
+  $ dep_flow=$(flow_events | awk '$2 == "build-dep-start" { print $1; exit }')
+  $ flow_events | awk -v id="$dep_flow" '$1 == id { print $2, $3 }'
+  build-dep-start TYPE_INSTANT
+  build-dep-finish TYPE_INSTANT
+
+Collapsed instants carry no flow -- this build's build-dep-resolved (the
+/etc/hosts dep, see above) never shows up in the flow list:
+
+  $ flow_events | grep -q resolved && echo yes
+  [1]
+
 The event's own category ("graph") is still interned, just no longer doubles
 as every async track's name:
 
@@ -370,6 +420,14 @@ start/finish args (`dir`, `rule_id`, `async_id`) plus the outcome and
   $ grep -q 'name: "exec-rule-resolved"' dump.textpb && echo yes
   yes
   $ grep -qE 'str: "local-cache-hit"|str: "shared-cache-hit"' dump.textpb && echo yes
+  yes
+
+The collapsed instants carry no flow here either (the rebuild's build-dep
+spans still resolve to rules, so those flows remain):
+
+  $ flow_events | grep -q resolved && echo yes
+  [1]
+  $ flow_events | grep -q build-dep-start && echo yes
   yes
 
 Cache hits execute no action, so this trace has no exec-rule-action slices --

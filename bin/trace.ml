@@ -421,6 +421,7 @@ module Perfetto_conv = struct
     ; target_dirs : string list
     ; forced_by : Sexp.t
     ; begin_ts : int
+    ; flow_id : int
     }
 
   (* Likewise for an open build-dep span. *)
@@ -428,6 +429,7 @@ module Perfetto_conv = struct
     { dep : string
     ; forced_by : Sexp.t
     ; begin_ts : int
+    ; flow_id : int
     }
 
   (* Likewise for an open gen-rules span. Not part of the graph blob (only
@@ -435,12 +437,14 @@ module Perfetto_conv = struct
   type gen_rules_begin =
     { gen_rules_dir : string
     ; gen_rules_begin_ts : int
+    ; gen_rules_flow_id : int
     }
 
   (* Likewise for an open dynamic-includes span. *)
   type dynamic_includes_begin =
     { dynamic_includes_dune_file : string
     ; dynamic_includes_begin_ts : int
+    ; dynamic_includes_flow_id : int
     }
 
   type t =
@@ -463,6 +467,12 @@ module Perfetto_conv = struct
     ; (* Lane uuids whose slice has ended, available for reuse. *)
       mutable free_action_lanes : int list
     ; mutable next_action_lane : int
+    ; (* One fresh flow id per buffered span begin, chaining its lifecycle
+         events (start instant, action Begin slice, finish instant) in
+         timestamp order (see doc/dev/trace-graph-perfetto.md, phase 4).
+         Collapsed instants carry no flow, so a cache-hit/source span's id is
+         simply never emitted. *)
+      mutable next_flow_id : int
     ; mutable rev_rule_lines : string list
     ; mutable rev_dep_lines : string list
     }
@@ -480,12 +490,19 @@ module Perfetto_conv = struct
     ; open_actions = Table.create (module Int) 64
     ; free_action_lanes = []
     ; next_action_lane = first_action_lane_uuid
+    ; next_flow_id = 1
     ; rev_rule_lines = []
     ; rev_dep_lines = []
     }
   ;;
 
   let push t p = t.rev_packets <- p :: t.rev_packets
+
+  let fresh_flow_id t =
+    let id = t.next_flow_id in
+    t.next_flow_id <- id + 1;
+    id
+  ;;
 
   let field key rest =
     List.find_map rest ~f:(function
@@ -557,8 +574,9 @@ module Perfetto_conv = struct
 
   (* Emit an instant on the fixed track [uuid]/[track_name], declaring the
      track the first time. Used for the lifecycle instants below and (via
-     [push_graph_section]) the graph blob. *)
-  let push_instant t ~uuid ~track_name ~name ~ts ~args =
+     [push_graph_section]) the graph blob. [flow_ids] is the span's lifecycle
+     flow ([] where none applies: collapsed instants and the blob). *)
+  let push_instant t ~uuid ~track_name ~name ~ts ~flow_ids ~args =
     ensure_track t uuid ~name:track_name;
     push
       t
@@ -567,6 +585,7 @@ module Perfetto_conv = struct
             ~name
             ~categories:[ "graph" ]
             ~args
+            ~flow_ids
             P.Event.Type.Instant
             ~track_uuid:uuid
             ~ts))
@@ -596,6 +615,7 @@ module Perfetto_conv = struct
         ~track_name:"exec-rule"
         ~name:"exec-rule-resolved"
         ~ts:b.begin_ts
+        ~flow_ids:[]
         ~args:
           (dune_args
              ([ P.Arg.string ~name:"dir" dir
@@ -611,6 +631,7 @@ module Perfetto_conv = struct
         ~track_name:"exec-rule"
         ~name:"exec-rule-start"
         ~ts:b.begin_ts
+        ~flow_ids:[ b.flow_id ]
         ~args:
           (dune_args
              ([ P.Arg.string ~name:"dir" dir; async_id_arg async_id ]
@@ -621,6 +642,7 @@ module Perfetto_conv = struct
         ~track_name:"exec-rule"
         ~name:"exec-rule-finish"
         ~ts
+        ~flow_ids:[ b.flow_id ]
         ~args:
           (dune_args
              ([ async_id_arg async_id
@@ -651,6 +673,7 @@ module Perfetto_conv = struct
         ~track_name:"build-dep"
         ~name:"build-dep-resolved"
         ~ts:b.begin_ts
+        ~flow_ids:[]
         ~args:
           (dune_args
              [ P.Arg.string ~name:"dep" dep
@@ -665,6 +688,7 @@ module Perfetto_conv = struct
         ~track_name:"build-dep"
         ~name:"build-dep-start"
         ~ts:b.begin_ts
+        ~flow_ids:[ b.flow_id ]
         ~args:(dune_args [ P.Arg.string ~name:"dep" dep; async_id_arg async_id ]);
       push_instant
         t
@@ -672,6 +696,7 @@ module Perfetto_conv = struct
         ~track_name:"build-dep"
         ~name:"build-dep-finish"
         ~ts
+        ~flow_ids:[ b.flow_id ]
         ~args:
           (dune_args
              ([ async_id_arg async_id
@@ -692,6 +717,7 @@ module Perfetto_conv = struct
       ~track_name:"gen-rules"
       ~name:"gen-rules-start"
       ~ts:b.gen_rules_begin_ts
+      ~flow_ids:[ b.gen_rules_flow_id ]
       ~args:
         (dune_args [ P.Arg.string ~name:"dir" b.gen_rules_dir; async_id_arg async_id ]);
     push_instant
@@ -700,6 +726,7 @@ module Perfetto_conv = struct
       ~track_name:"gen-rules"
       ~name:"gen-rules-finish"
       ~ts
+      ~flow_ids:[ b.gen_rules_flow_id ]
       ~args:
         (dune_args
            ((match dune_file with
@@ -717,6 +744,7 @@ module Perfetto_conv = struct
       ~track_name:"dynamic-includes"
       ~name:"dynamic-includes-start"
       ~ts:b.dynamic_includes_begin_ts
+      ~flow_ids:[ b.dynamic_includes_flow_id ]
       ~args:
         (dune_args
            [ P.Arg.string ~name:"dune_file" b.dynamic_includes_dune_file
@@ -728,6 +756,7 @@ module Perfetto_conv = struct
       ~track_name:"dynamic-includes"
       ~name:"dynamic-includes-finish"
       ~ts
+      ~flow_ids:[ b.dynamic_includes_flow_id ]
       ~args:(dune_args [ async_id_arg async_id; P.Arg.int ~name:"dur_ns" dur_ns ])
   ;;
 
@@ -763,6 +792,7 @@ module Perfetto_conv = struct
            ; target_dirs = ids "target_dirs"
            ; forced_by
            ; begin_ts = ts
+           ; flow_id = fresh_flow_id t
            }
        | _ -> ())
     | "exec-rule-action" ->
@@ -788,6 +818,17 @@ module Perfetto_conv = struct
         | Some (Atom id) -> rule_id_arg id
         | _ -> []
       in
+      (* The action shares its rule's [async_id] and always begins after the
+         rule's begin, so the rule's lifecycle flow id is sitting in
+         [open_rules]; carrying it here chains, in timestamp order,
+         exec-rule-start -> this slice -> exec-rule-finish. An action also
+         proves the rule executed, so the id is guaranteed to surface on the
+         start/finish instants (never on a collapsed one). *)
+      let flow_ids =
+        match Table.find t.open_rules async_id with
+        | Some (b : rule_begin) -> [ b.flow_id ]
+        | None -> []
+      in
       push
         t
         (P.Track_event
@@ -795,13 +836,17 @@ module Perfetto_conv = struct
               ~name:"exec-rule-action"
               ~categories:[ "graph" ]
               ~args:(dune_args (async_id_arg async_id :: rule_id_args))
+              ~flow_ids
               P.Event.Type.Begin
               ~track_uuid:lane
               ~ts))
     | "build-dep" ->
       (match field "dep" rest with
        | Some (Atom dep) ->
-         Table.set t.open_deps async_id { dep; forced_by; begin_ts = ts }
+         Table.set
+           t.open_deps
+           async_id
+           { dep; forced_by; begin_ts = ts; flow_id = fresh_flow_id t }
        | _ -> ())
     | "gen-rules" ->
       (match field "dir" rest with
@@ -809,7 +854,10 @@ module Perfetto_conv = struct
          Table.set
            t.open_gen_rules
            async_id
-           { gen_rules_dir = dir; gen_rules_begin_ts = ts }
+           { gen_rules_dir = dir
+           ; gen_rules_begin_ts = ts
+           ; gen_rules_flow_id = fresh_flow_id t
+           }
        | _ -> ())
     | "dynamic-includes" ->
       (match field "dune_file" rest with
@@ -817,7 +865,10 @@ module Perfetto_conv = struct
          Table.set
            t.open_dynamic_includes
            async_id
-           { dynamic_includes_dune_file = dune_file; dynamic_includes_begin_ts = ts }
+           { dynamic_includes_dune_file = dune_file
+           ; dynamic_includes_begin_ts = ts
+           ; dynamic_includes_flow_id = fresh_flow_id t
+           }
        | _ -> ())
     | _ -> ()
   ;;
@@ -964,7 +1015,10 @@ module Perfetto_conv = struct
   (* Unmatched begins, also flushed as bare "-start" instants on their kind's
      track (see doc/dev/trace-graph-perfetto.md, phase 2): the finish never
      arrives, so there is nothing to pair with. Sorted by [async_id] like the
-     blob flush above, for the same determinism reason. *)
+     blob flush above, for the same determinism reason. They keep their flow
+     id: for a rule that crashed mid-action, the action's Begin slice already
+     carries it, so the start -> action arrow survives (elsewhere the id ends
+     up on a single event, which draws nothing). *)
   let flush_open_start_instants t =
     let sorted tbl =
       Table.to_list tbl |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
@@ -976,6 +1030,7 @@ module Perfetto_conv = struct
         ~track_name:"exec-rule"
         ~name:"exec-rule-start"
         ~ts:b.begin_ts
+        ~flow_ids:[ b.flow_id ]
         ~args:
           (dune_args
              ([ P.Arg.string ~name:"dir" (resolve_id t.names b.dir)
@@ -989,6 +1044,7 @@ module Perfetto_conv = struct
         ~track_name:"build-dep"
         ~name:"build-dep-start"
         ~ts:b.begin_ts
+        ~flow_ids:[ b.flow_id ]
         ~args:
           (dune_args
              [ P.Arg.string ~name:"dep" (resolve_id t.names b.dep)
@@ -1001,6 +1057,7 @@ module Perfetto_conv = struct
         ~track_name:"gen-rules"
         ~name:"gen-rules-start"
         ~ts:b.gen_rules_begin_ts
+        ~flow_ids:[ b.gen_rules_flow_id ]
         ~args:
           (dune_args [ P.Arg.string ~name:"dir" b.gen_rules_dir; async_id_arg async_id ]));
     List.iter
@@ -1012,6 +1069,7 @@ module Perfetto_conv = struct
           ~track_name:"dynamic-includes"
           ~name:"dynamic-includes-start"
           ~ts:b.dynamic_includes_begin_ts
+          ~flow_ids:[ b.dynamic_includes_flow_id ]
           ~args:
             (dune_args
                [ P.Arg.string ~name:"dune_file" b.dynamic_includes_dune_file
@@ -1039,6 +1097,7 @@ module Perfetto_conv = struct
         ~track_name:"dune-graph"
         ~name
         ~ts:t.last_ts
+        ~flow_ids:[]
         ~args:
           [ P.Arg.dict
               ~name:"dune"

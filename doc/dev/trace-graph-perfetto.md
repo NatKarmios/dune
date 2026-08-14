@@ -1,6 +1,6 @@
 # Graph trace: Perfetto export redesign
 
-Status: phases 1-3 implemented; phases 4-5 planned. This document is the
+Status: phases 1-4 implemented; phase 5 planned. This document is the
 working plan; it is intended to be executed phase by phase over multiple
 agent sessions. Each phase is independently committable and must pass
 `dune build @check @fmt @runtest` (scope test runs to
@@ -371,7 +371,7 @@ Implementation notes / deviations from the schema as originally drafted:
   producer with SIGPIPE (observed as exit 141) — a latent problem this
   phase's extra output exposed.
 
-### Phase 4 — lifecycle flows
+### Phase 4 — lifecycle flows — **implemented**
 
 - Allocate a fresh flow id per non-collapsed span when its begin is
   buffered; set `flow_ids` on the start instant, the matching
@@ -395,6 +395,30 @@ Implementation notes / deviations from the schema as originally drafted:
   begin, and finish for an executed rule, and on start+finish for a
   non-collapsed `build-dep` span (the other kinds without an action work
   identically).
+
+Implementation notes / deviations from the schema as originally drafted:
+
+- A flow id is allocated for *every* buffered begin, not only non-collapsed
+  spans — collapse status is unknown until the end arrives. A collapsed
+  span's id is simply never emitted, so the ids appearing in a trace are
+  not contiguous.
+- Deferring action-slice construction to action-end time turned out to be
+  unnecessary: the flow id lives in the buffered `rule_begin`, and the
+  action Begin always arrives while the rule's begin is still buffered
+  (they share `async_id`), so the Begin picks the id up by table lookup at
+  the time it is pushed.
+- EOF-flushed bare `-start` instants (crash/interrupt) keep their flow id:
+  for a rule that crashed mid-action, the action's Begin slice already
+  carries the id, so the start → action arrow survives. Elsewhere the id
+  ends up on a single event, which draws nothing and is harmless.
+- `perfetto.t`'s flow assertions resolve `name_iid` against the interned
+  `event_names` table in the `--text` dump. Two traps documented in the
+  test: a name's `interned_data` definition sits *after* the first
+  track_event referencing it in the same packet (interning happens at
+  first use), and debug annotations carry `name_iid:` lines from a
+  *different* intern table, so event-level fields must be matched by their
+  exact indentation. An earlier draft of the test ignored the second trap
+  and passed on one trace by iid coincidence while failing on another.
 
 ### Phase 5 — docs and follow-ups
 
