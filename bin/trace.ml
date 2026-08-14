@@ -277,19 +277,142 @@ let json_of_event ~chrome (sexp : Sexp.t) =
        @ id_field)
 ;;
 
+(* The build-graph blob: a chunked dump of the graph's structure (the intern
+   table, and one record per exec-rule/build-dep span), emitted as instants on
+   a dedicated "dune-graph" track instead of scattering it across per-slice
+   debug annotations (see doc/dev/trace-graph-perfetto.md, phase 1). Payloads
+   are line-oriented, tab-separated records; this module only knows how to
+   render the pieces of a single record (a forced-by tag, a dep outcome, a
+   rule outcome) and how to chunk and escape the assembled lines. It has no
+   converter state. *)
+module Graph_blob = struct
+  let version = 1
+  let default_chunk_size = 4 * 1024 * 1024
+
+  (* Overridable so a test can force multi-chunk framing without a
+     multi-megabyte trace. Non-positive or unparseable values are ignored. *)
+  let chunk_size =
+    lazy
+      (match Sys.getenv_opt "DUNE_TRACE_GRAPH_CHUNK_SIZE" with
+       | None -> default_chunk_size
+       | Some s ->
+         (match int_of_string_opt s with
+          | Some n when n > 0 -> n
+          | _ -> default_chunk_size))
+  ;;
+
+  (* C-style escaping of the three characters that would otherwise corrupt the
+     line/tab framing. Only used on [graph-dict] values: every other field in
+     a record is a digit, a comma, or one of our own fixed tags. *)
+  let escape s =
+    let buf = Buffer.create (String.length s) in
+    String.iter s ~f:(fun c ->
+      match c with
+      | '\\' -> Buffer.add_string buf "\\\\"
+      | '\t' -> Buffer.add_string buf "\\t"
+      | '\n' -> Buffer.add_string buf "\\n"
+      | c -> Buffer.add_char buf c);
+    Buffer.contents buf
+  ;;
+
+  (* Join [records] with newlines, splitting into chunks of at most
+     [chunk_size] bytes without ever splitting inside a record (a single
+     over-long record gets a chunk of its own). [] in, [] out. *)
+  let chunks records =
+    let limit = Lazy.force chunk_size in
+    let flush chunks cur =
+      match cur with
+      | [] -> chunks
+      | _ :: _ -> String.concat ~sep:"\n" (List.rev cur) :: chunks
+    in
+    let chunks, cur, _cur_len =
+      List.fold_left records ~init:([], [], 0) ~f:(fun (chunks, cur, cur_len) r ->
+        let r_len = String.length r in
+        match cur with
+        | [] -> chunks, [ r ], r_len
+        | _ :: _ when cur_len + 1 + r_len > limit -> flush chunks cur, [ r ], r_len
+        | _ :: _ -> chunks, r :: cur, cur_len + 1 + r_len)
+    in
+    List.rev (flush chunks cur)
+  ;;
+
+  (* [forced_by] rendered as one of the short codes in the schema: "u"
+     (unknown), "r<id>", "d<id>", "i<id>", "g<id>", "p<id>", "c", "q". Mirrors
+     [Perfetto_conv.forced_by_arg]'s pattern match; an unrecognised shape
+     degrades to "u" rather than failing the whole conversion. *)
+  let forced_by_code = function
+    | Sexp.List [] -> "u"
+    | Sexp.List (Atom "rule" :: Atom id :: _) -> "r" ^ id
+    | Sexp.List (Atom "dep" :: Atom id :: _) -> "d" ^ id
+    | Sexp.List (Atom "dynamic-includes" :: Atom id :: _) -> "i" ^ id
+    | Sexp.List (Atom "gen-rules" :: Atom id :: _) -> "g" ^ id
+    | Sexp.List (Atom "pform" :: Atom id :: _) -> "p" ^ id
+    | Sexp.List (Atom "configurator" :: _) -> "c"
+    | Sexp.List (Atom "request" :: _) -> "q"
+    | _ -> "u"
+  ;;
+
+  (* [Build_dep.outcome] rendered as "r<rule_id>" | "s" | "x<id,id,...>". *)
+  let dep_resolution = function
+    | Sexp.List (Atom "rule" :: Atom id :: _) -> "r" ^ id
+    | Sexp.List (Atom "is-source" :: _) -> "s"
+    | Sexp.List (Atom "expanded" :: ids) ->
+      "x"
+      ^ String.concat
+          ~sep:","
+          (List.filter_map ids ~f:(function
+             | Sexp.Atom s -> Some s
+             | _ -> None))
+    | _ -> "?"
+  ;;
+
+  (* [Exec_rule.outcome_to_string]'s value rendered as "X" | "L" | "S". *)
+  let rule_outcome_code = function
+    | "executed" -> "X"
+    | "local-cache-hit" -> "L"
+    | "shared-cache-hit" -> "S"
+    | _ -> "?"
+  ;;
+
+  let ids_field ids = String.concat ~sep:"," ids
+
+  let dyn_deps_field stages =
+    String.concat ~sep:"|" (List.map stages ~f:(String.concat ~sep:","))
+  ;;
+end
+
 (* Perfetto native-protobuf export. Consumes the same csexp event stream as
    [json_of_event], mapping each graph async span (matched by its "id") to a
    Perfetto slice on its own track, flat complete/instant events to
    slices/instants on a main thread track, and the intern tables to readable
-   target/dep names. *)
+   target/dep names. It also accumulates the graph blob (see [Graph_blob])
+   for exec-rule/build-dep spans, flushed once at the end in [to_packets]. *)
 module Perfetto_conv = struct
   module P = Dune_perfetto
 
-  (* Track uuids: a single process track, one main thread track under it, and
-     one child track per async span id (offset past the two fixed uuids). *)
+  (* Track uuids: a single process track, one main thread track and one graph
+     blob track under it, and one child track per async span id (offset past
+     the three fixed uuids). *)
   let process_uuid = 1
   let main_thread_uuid = 2
-  let async_uuid id = id + 3
+  let graph_uuid = 3
+  let async_uuid id = id + 4
+
+  (* The begin-side fields of an open exec-rule span, buffered under its
+     [async_id] until the matching end supplies the outcome/deps. *)
+  type rule_begin =
+    { rule_id : string
+    ; dir : string
+    ; target_files : string list
+    ; target_dirs : string list
+    ; forced_by : Sexp.t
+    }
+
+  (* Likewise for an open build-dep span. *)
+  type dep_begin =
+    { dep : string
+    ; forced_by : Sexp.t
+    }
 
   type t =
     { mutable declared_process : bool
@@ -298,6 +421,13 @@ module Perfetto_conv = struct
          event). Maps id -> readable value. *)
       names : (int, string) Table.t
     ; mutable rev_packets : P.packet list
+    ; (* Timestamp (ns) of the last event seen, including [intern] events;
+         used to place the graph blob's instants. *)
+      mutable last_ts : int
+    ; open_rules : (int, rule_begin) Table.t
+    ; open_deps : (int, dep_begin) Table.t
+    ; mutable rev_rule_lines : string list
+    ; mutable rev_dep_lines : string list
     }
 
   let create () =
@@ -305,6 +435,11 @@ module Perfetto_conv = struct
     ; seen_async = Table.create (module Int) 256
     ; names = Table.create (module Int) 2048
     ; rev_packets = []
+    ; last_ts = 0
+    ; open_rules = Table.create (module Int) 256
+    ; open_deps = Table.create (module Int) 256
+    ; rev_rule_lines = []
+    ; rev_dep_lines = []
     }
   ;;
 
@@ -387,6 +522,185 @@ module Perfetto_conv = struct
 
   let string_array ~name strings =
     P.Arg.array ~name (List.map strings ~f:(fun s -> P.Arg.string ~name:"" s))
+  ;;
+
+  (* Buffer the begin-side fields of an exec-rule/build-dep span, keyed by
+     [async_id], until [record_span_end] can pair it with its end and append
+     a graph-blob record. Fields are taken verbatim off [rest] (still raw
+     sexp atoms — e.g. intern ids, not resolved strings): the blob carries
+     ids, leaving resolution to the plugin via [graph-dict]. A malformed begin
+     (missing a required field) is silently dropped: the matching end will
+     then find nothing buffered and drop too, same as an end with no begin. *)
+  let record_span_begin t ~name ~async_id rest =
+    let forced_by = Option.value (field "forced_by" rest) ~default:(Sexp.List []) in
+    let ids key =
+      match field key rest with
+      | Some (List ids) ->
+        List.filter_map ids ~f:(function
+          | Sexp.Atom s -> Some s
+          | _ -> None)
+      | _ -> []
+    in
+    match name with
+    | "exec-rule" ->
+      (match field "rule_id" rest, field "dir" rest with
+       | Some (Atom rule_id), Some (Atom dir) ->
+         Table.set
+           t.open_rules
+           async_id
+           { rule_id
+           ; dir
+           ; target_files = ids "target_files"
+           ; target_dirs = ids "target_dirs"
+           ; forced_by
+           }
+       | _ -> ())
+    | "build-dep" ->
+      (match field "dep" rest with
+       | Some (Atom dep) -> Table.set t.open_deps async_id { dep; forced_by }
+       | _ -> ())
+    | _ -> ()
+  ;;
+
+  (* Pair a matching end with its buffered begin and append the completed
+     graph-blob record, in trace order (i.e. ordered by end time). An end
+     with no buffered begin (the begin was malformed, or predates this
+     process) is dropped; a begin with no end is flushed separately at EOF
+     (see [to_packets]). *)
+  let record_span_end t ~name ~async_id rest =
+    match name with
+    | "exec-rule" ->
+      (match Table.find t.open_rules async_id with
+       | None -> ()
+       | Some b ->
+         Table.remove t.open_rules async_id;
+         let outcome =
+           match field "rule_outcome" rest with
+           | Some (Atom s) -> Graph_blob.rule_outcome_code s
+           | _ -> "?"
+         in
+         let ids key =
+           match field key rest with
+           | Some (List ids) ->
+             List.filter_map ids ~f:(function
+               | Sexp.Atom s -> Some s
+               | _ -> None)
+           | _ -> []
+         in
+         let dyn_deps =
+           match field "dyn_deps" rest with
+           | Some (List stages) ->
+             List.map stages ~f:(function
+               | Sexp.List stage_ids ->
+                 List.filter_map stage_ids ~f:(function
+                   | Sexp.Atom s -> Some s
+                   | _ -> None)
+               | _ -> [])
+           | _ -> []
+         in
+         let line =
+           String.concat
+             ~sep:"\t"
+             [ b.rule_id
+             ; b.dir
+             ; Graph_blob.ids_field b.target_files
+             ; Graph_blob.ids_field b.target_dirs
+             ; outcome
+             ; Graph_blob.forced_by_code b.forced_by
+             ; Graph_blob.ids_field (ids "deps")
+             ; Graph_blob.dyn_deps_field dyn_deps
+             ]
+         in
+         t.rev_rule_lines <- line :: t.rev_rule_lines)
+    | "build-dep" ->
+      (match Table.find t.open_deps async_id with
+       | None -> ()
+       | Some b ->
+         Table.remove t.open_deps async_id;
+         let resolution =
+           match field "dep_outcome" rest with
+           | Some v -> Graph_blob.dep_resolution v
+           | None -> "?"
+         in
+         let line =
+           String.concat
+             ~sep:"\t"
+             [ b.dep; resolution; Graph_blob.forced_by_code b.forced_by ]
+         in
+         t.rev_dep_lines <- line :: t.rev_dep_lines)
+    | _ -> ()
+  ;;
+
+  (* Dispatch a graph event's (already-extracted) phase/id to the begin/end
+     recorders above; anything else (a different category, an "instant"
+     phase, or a malformed async event) is not part of the blob. *)
+  let record_graph_span t ~cat ~name ~async_phase ~async_id rest =
+    match cat, async_phase, async_id with
+    | "graph", Some "begin", Some id -> record_span_begin t ~name ~async_id:id rest
+    | "graph", Some "end", Some id -> record_span_end t ~name ~async_id:id rest
+    | _ -> ()
+  ;;
+
+  (* Unmatched begins (crash/interrupt: EOF reached with a span still open) as
+     records with "?" for the fields only the end would have supplied,
+     sorted by [async_id] for determinism (see doc/dev/trace-graph-perfetto.md,
+     phase 1). *)
+  let flush_open_rules t =
+    Table.to_list t.open_rules
+    |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
+    |> List.map ~f:(fun (_, b) ->
+      String.concat
+        ~sep:"\t"
+        [ b.rule_id
+        ; b.dir
+        ; Graph_blob.ids_field b.target_files
+        ; Graph_blob.ids_field b.target_dirs
+        ; "?"
+        ; Graph_blob.forced_by_code b.forced_by
+        ; ""
+        ; ""
+        ])
+  ;;
+
+  let flush_open_deps t =
+    Table.to_list t.open_deps
+    |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
+    |> List.map ~f:(fun (_, b) ->
+      String.concat ~sep:"\t" [ b.dep; "?"; Graph_blob.forced_by_code b.forced_by ])
+  ;;
+
+  (* The intern table as "id\tvalue" lines, sorted by id: the only place in
+     the blob where an arbitrary (escaped) string appears. *)
+  let dict_lines t =
+    Table.to_list t.names
+    |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
+    |> List.map ~f:(fun (id, value) -> sprintf "%d\t%s" id (Graph_blob.escape value))
+  ;;
+
+  (* Emit one instant per chunk of [records], named [name], on the graph
+     track, carrying [version]/[seq]/[total]/[data]. *)
+  let push_graph_section t ~name records =
+    let chunks = Graph_blob.chunks records in
+    let total = List.length chunks in
+    List.iteri chunks ~f:(fun seq data ->
+      push
+        t
+        (P.Track_event
+           (P.Event.create
+              ~name
+              ~categories:[ "graph" ]
+              ~args:
+                [ P.Arg.dict
+                    ~name:"dune"
+                    [ P.Arg.int ~name:"version" Graph_blob.version
+                    ; P.Arg.int ~name:"seq" seq
+                    ; P.Arg.int ~name:"total" total
+                    ; P.Arg.string ~name:"data" data
+                    ]
+                ]
+              P.Event.Type.Instant
+              ~track_uuid:graph_uuid
+              ~ts:t.last_ts)))
   ;;
 
   (* [Graph.forced_by] as a nested dict: a [kind] tag plus (for all but
@@ -550,14 +864,16 @@ module Perfetto_conv = struct
 
   let add t sexp =
     let cat, name, ts_sexp, rest, _ = base_of_sexp sexp in
+    let ts, dur = times_of_sexp ts_sexp in
+    let ts_ns = Time.to_ns ts in
+    t.last_ts <- ts_ns;
     match name with
     | "intern" -> record_interns t rest
     | _ ->
-      let ts, dur = times_of_sexp ts_sexp in
-      let ts_ns = Time.to_ns ts in
       ensure_process t;
       let async_phase, rest = async_phase_of_sexp rest in
       let async_id, rest = async_id_of_sexp rest in
+      record_graph_span t ~cat ~name ~async_phase ~async_id rest;
       let args = event_fields t ~name rest in
       let open P.Event.Type in
       (match async_phase, async_id with
@@ -609,7 +925,27 @@ module Perfetto_conv = struct
                     ~ts:ts_ns))))
   ;;
 
-  let to_packets t = List.rev t.rev_packets
+  (* The blob can only be assembled once the whole stream has been seen (it
+     needs every intern entry and the EOF-time set of still-open spans), so
+     it is flushed here rather than incrementally in [add]. Emits nothing if
+     the trace has no [graph] category data, leaving existing traces (and
+     assertions about them) unchanged. *)
+  let to_packets t =
+    let dict = dict_lines t in
+    let rules = List.rev t.rev_rule_lines @ flush_open_rules t in
+    let deps = List.rev t.rev_dep_lines @ flush_open_deps t in
+    if not (List.is_empty dict && List.is_empty rules && List.is_empty deps)
+    then (
+      ensure_process t;
+      push
+        t
+        (P.Track_descriptor
+           (P.Track.child ~uuid:graph_uuid ~parent_uuid:process_uuid ~name:"dune-graph"));
+      push_graph_section t ~name:"graph-dict" dict;
+      push_graph_section t ~name:"graph-rules" rules;
+      push_graph_section t ~name:"graph-deps" deps);
+    List.rev t.rev_packets
+  ;;
 end
 
 let perfetto =

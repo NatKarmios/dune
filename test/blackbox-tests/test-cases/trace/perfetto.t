@@ -119,3 +119,108 @@ wire type 2 (0x0a):
   non-empty
   $ head -c 1 out.perfetto-trace | od -An -tx1 | tr -d ' '
   0a
+
+The build graph itself -- rules, deps, and the intern table that resolves
+their ids -- is additionally emitted as a chunked blob of line-oriented,
+tab-separated records on a dedicated "dune-graph" track (see
+doc/dev/trace-graph-perfetto.md), rather than as one args-table row per
+dependency-array element:
+
+  $ dune trace perfetto --text | grep -c 'name: "dune-graph"'
+  1
+  $ dune trace perfetto --text | grep -q 'name: "graph-dict"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'name: "graph-rules"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'name: "graph-deps"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'name: "version"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'name: "seq"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'name: "total"' && echo yes
+  yes
+  $ dune trace perfetto --text | grep -q 'name: "data"' && echo yes
+  yes
+
+Each chunk's payload is one `str:` debug-annotation value. Decode the first
+(here: only) chunk of a named section by finding its packet and undoing the
+text dump's own escaping of that value, leaving our own tab/newline/backslash
+escaping of the record fields intact; real tabs (the record's field
+separator) are then swapped for "~" so a record reads on one line:
+
+  $ decode_section() {
+  >   dune trace perfetto --text \
+  >   | grep -A 30 "name: \"$1\"" \
+  >   | grep -m1 '^ *str: "' \
+  >   | sed 's/^ *str: "\(.*\)"$/\1/' \
+  >   | { IFS= read -r chunk; printf '%b' "$chunk"; } \
+  >   | tr '\t' '~'
+  > }
+
+The dict maps intern ids to the same readable strings seen elsewhere in this
+file:
+
+  $ decode_section graph-dict | grep -c '~_build/default$'
+  1
+  $ decode_section graph-dict | grep -c '~out.txt$'
+  1
+  $ decode_section graph-dict | grep -c '~_build/default/dep.txt$'
+  1
+
+A graph-rules record is `<rule_id>~<dir_id>~<target_file_ids>~<target_dirs>~
+<outcome>~<forced_by>~<dep_ids>~<dyn_dep_stages>`. Resolving the dict ids of
+"_build/default" and "out.txt" against it finds the rule that builds out.txt:
+executed (not a cache hit -- "X"), with no directory targets, depending on
+dep.txt and the glob (in declaration order):
+
+  $ dir_id=$(decode_section graph-dict | grep '~_build/default$' | cut -d~ -f1)
+  $ out_id=$(decode_section graph-dict | grep '~out.txt$' | cut -d~ -f1)
+  $ dep_id=$(decode_section graph-dict | grep '~_build/default/dep.txt$' | cut -d~ -f1)
+  $ glob_id=$(decode_section graph-dict | grep '~_build/default/\*\.src$' | cut -d~ -f1)
+  $ out_rule=$(decode_section graph-rules | grep "^[0-9]*~$dir_id~$out_id~~X~")
+  $ test -n "$out_rule" && echo yes
+  yes
+  $ test "$(echo "$out_rule" | cut -d~ -f7)" = "$dep_id,$glob_id" && echo yes
+  yes
+
+The matching graph-deps records (`<dep_id>~<resolution>~<forced_by>`) resolve
+dep.txt to the rule that produces it ("r<rule_id>"), and the glob to its
+expanded members, also by dict id rather than full paths ("x<id,id,...>"):
+
+  $ decode_section graph-deps | grep -qE "^$dep_id~r[0-9]+~" && echo yes
+  yes
+  $ decode_section graph-deps | grep -qE "^$glob_id~x[0-9]+(,[0-9]+)*~" && echo yes
+  yes
+
+Overriding the chunk size (bytes) via `DUNE_TRACE_GRAPH_CHUNK_SIZE` forces
+several chunks per section without needing a multi-megabyte trace. The total
+record count across all chunks of the graph blob must stay the same as the
+unsplit run, proving the splitter never breaks a record across a chunk
+boundary:
+
+  $ decode_all() {
+  >   dune trace perfetto --text \
+  >   | sed -n 's/^ *str: "\([0-9][0-9]*\\t.*\)"$/\1/p' \
+  >   | while IFS= read -r chunk; do printf '%b\n' "$chunk"; done
+  > }
+  $ unsplit_chunks=$(dune trace perfetto --text | grep -c '^ *str: "[0-9][0-9]*\\t')
+  $ unsplit_records=$(decode_all | wc -l)
+  $ export DUNE_TRACE_GRAPH_CHUNK_SIZE=64
+  $ split_chunks=$(dune trace perfetto --text | grep -c '^ *str: "[0-9][0-9]*\\t')
+  $ split_records=$(decode_all | wc -l)
+  $ unset DUNE_TRACE_GRAPH_CHUNK_SIZE
+  $ test "$split_chunks" -gt "$unsplit_chunks" && echo yes
+  yes
+  $ test "$split_records" = "$unsplit_records" && echo yes
+  yes
+
+A value containing the characters our own escaping must protect -- here, a
+backslash -- is round-tripped rather than corrupting the record's framing;
+resolving it against the dict still gives back exactly one line, with the
+backslash still escaped in the (once-decoded) output:
+
+  $ touch 'back\slash.src'
+  $ DUNE_TRACE=+graph dune build out.txt
+  $ decode_section graph-dict | grep -c '~_build/default/back\\\\slash.src$'
+  1
