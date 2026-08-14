@@ -17,64 +17,78 @@ events onto a main thread track.
   >  (action (with-stdout-to out.txt (cat dep.txt))))
   > (rule
   >  (target copy.txt)
-  >  (deps /etc/hosts)
+  >  (deps /etc/hosts out.txt)
   >  (action (copy /etc/hosts copy.txt)))
   > EOF
 
+(copy.txt depends on out.txt, which depends on dep.txt, so the three project
+actions execute strictly one after another -- guaranteeing the
+exec-rule-action lane reuse asserted below.)
+
   $ DUNE_TRACE=+graph dune build out.txt copy.txt
 
-The `--text` flag emits a human-readable, protobuf-text-format-style dump. A
-single process track named "dune" holds a "main" thread track:
+The `--text` flag emits a human-readable, protobuf-text-format-style dump.
+Cram runs commands under pipefail, and the dump is large enough that a
+`grep -q` closing the pipe early would kill the producer with SIGPIPE, so
+capture it to a file once per build and grep that:
 
-  $ dune trace perfetto --text | grep -c 'process_name: "dune"'
+  $ dune trace perfetto --text > dump.textpb
+
+A single process track named "dune" holds a "main" thread track:
+
+  $ grep -c 'process_name: "dune"' dump.textpb
   1
-  $ dune trace perfetto --text | grep -c 'thread_name: "main"'
+  $ grep -c 'thread_name: "main"' dump.textpb
   1
 
 Flat events with a duration (e.g. spawned processes) still become slices
 (begin/end pairs) on the main thread track:
 
-  $ dune trace perfetto --text | grep -q 'type: TYPE_SLICE_BEGIN' && echo yes
+  $ grep -q 'type: TYPE_SLICE_BEGIN' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'type: TYPE_SLICE_END' && echo yes
+  $ grep -q 'type: TYPE_SLICE_END' dump.textpb && echo yes
   yes
 
 Graph async spans (exec-rule, build-dep, gen-rules, dynamic-includes) become
 instants instead: unrelated spans of the same kind share one fixed track, so
 track descriptors no longer scale with the number of spans. This project only
 exercises three of the four kinds (no subdirectory means no dynamic-includes
-span), for a track count of six -- the process, the main thread, the graph
-blob, and the three kind tracks:
+span), for six fixed tracks -- the process, the main thread, the graph blob,
+and the three kind tracks -- plus one lane track per concurrently-executing
+action (see the exec-rule-action section below; the lane name also appears
+once as an interned event name, hence the arithmetic):
 
-  $ dune trace perfetto --text | grep -c 'track_descriptor {'
-  6
-  $ dune trace perfetto --text | grep -q 'name: "exec-rule"' && echo yes
+  $ tracks=$(grep -c 'track_descriptor {' dump.textpb)
+  $ lanes=$(($(grep -c 'name: "exec-rule-action"' dump.textpb) - 1))
+  $ test "$tracks" -eq $((6 + lanes)) && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "build-dep"' && echo yes
+  $ grep -q 'name: "exec-rule"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "gen-rules"' && echo yes
+  $ grep -q 'name: "build-dep"' dump.textpb && echo yes
+  yes
+  $ grep -q 'name: "gen-rules"' dump.textpb && echo yes
   yes
 
 Each kind's lifecycle is a start instant (at the begin timestamp) and a
 finish instant carrying `dur_ns`, paired by a shared `async_id`:
 
-  $ dune trace perfetto --text | grep -q 'type: TYPE_INSTANT' && echo yes
+  $ grep -q 'type: TYPE_INSTANT' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "exec-rule-start"' && echo yes
+  $ grep -q 'name: "exec-rule-start"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "exec-rule-finish"' && echo yes
+  $ grep -q 'name: "exec-rule-finish"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "build-dep-start"' && echo yes
+  $ grep -q 'name: "build-dep-start"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "build-dep-finish"' && echo yes
+  $ grep -q 'name: "build-dep-finish"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "gen-rules-start"' && echo yes
+  $ grep -q 'name: "gen-rules-start"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "gen-rules-finish"' && echo yes
+  $ grep -q 'name: "gen-rules-finish"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "async_id"' && echo yes
+  $ grep -q 'name: "async_id"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "dur_ns"' && echo yes
+  $ grep -q 'name: "dur_ns"' dump.textpb && echo yes
   yes
 
 `copy.txt` depends on `/etc/hosts`, a path outside the workspace entirely
@@ -84,28 +98,63 @@ so its build-dep resolves as `is-source`, the other collapsed case besides
 an exec-rule cache hit, producing a single `build-dep-resolved` instant
 instead of a start/finish pair:
 
-  $ dune trace perfetto --text | grep -q 'name: "build-dep-resolved"' && echo yes
+  $ grep -q 'name: "build-dep-resolved"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'str: "is-source"' && echo yes
+  $ grep -q 'str: "is-source"' dump.textpb && echo yes
+  yes
+
+An executed rule's action execution (its exec-rule-action span, sharing the
+rule's async_id) is real work bounded by -j, so it stays a true duration
+slice rather than becoming instants. Slices are rendered on a pool of lane
+tracks that all share the name "exec-rule-action" (so the UI merges them
+into one group), and a lane is reused only after its previous slice ends, so
+the pool stays as small as the build's actual action concurrency. Besides
+the three project rules, a fresh build also executes internal rules (the
+context's configurator probes, the copy-to-build-dir rules for the .src
+sources), and those may overlap, so exact counts aren't stable; assert the
+invariants instead: Begin/End events balance on the lanes, and there are
+fewer lanes than slices -- the three project actions are serialized by their
+dep chain, so at least one lane must have been reused:
+
+  $ action_lane_stats() {
+  >   awk '
+  >     $1 == "track_descriptor" { td = 1; uuid = "" }
+  >     td && $1 == "uuid:" { uuid = $2 }
+  >     td && /name: "exec-rule-action"/ && !(uuid in lane) { lane[uuid] = 1; lanes++ }
+  >     td && $1 == "}" { td = 0 }
+  >     $1 == "type:" { type = $2 }
+  >     $1 == "track_uuid:" && ($2 in lane) {
+  >       if (type == "TYPE_SLICE_BEGIN") begins++
+  >       if (type == "TYPE_SLICE_END") ends++
+  >     }
+  >     END { printf "lanes=%d; begins=%d; ends=%d\n", lanes, begins, ends }
+  >   ' dump.textpb
+  > }
+  $ eval "$(action_lane_stats)"
+  $ test "$begins" -gt 0 && echo yes
+  yes
+  $ test "$begins" -eq "$ends" && echo yes
+  yes
+  $ test "$lanes" -gt 0 && test "$lanes" -lt "$begins" && echo yes
   yes
 
 The event's own category ("graph") is still interned, just no longer doubles
 as every async track's name:
 
-  $ dune trace perfetto --text | grep -q 'name: "graph"' && echo yes
+  $ grep -q 'name: "graph"' dump.textpb && echo yes
   yes
 
 Repeated strings are interned. Event names and categories are referenced from
 track events by id (`name_iid` / `category_iids`), and defined once in an
 `interned_data` table:
 
-  $ dune trace perfetto --text | grep -q 'name_iid:' && echo yes
+  $ grep -q 'name_iid:' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'category_iids:' && echo yes
+  $ grep -q 'category_iids:' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'event_names {' && echo yes
+  $ grep -q 'event_names {' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "exec-rule"' && echo yes
+  $ grep -q 'name: "exec-rule"' dump.textpb && echo yes
   yes
 
 The lifecycle instants' fields become debug annotations, with `dir`/`dep`
@@ -113,19 +162,19 @@ resolved from their interned ids to readable paths at the time the matching
 end is seen. The annotation names and string values are themselves interned
 (`name_iid` / `string_value_iid`):
 
-  $ dune trace perfetto --text | grep -q 'debug_annotation_names {' && echo yes
+  $ grep -q 'debug_annotation_names {' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'debug_annotation_string_values {' && echo yes
+  $ grep -q 'debug_annotation_string_values {' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "dir"' && echo yes
+  $ grep -q 'name: "dir"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "dep"' && echo yes
+  $ grep -q 'name: "dep"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "rule_id"' && echo yes
+  $ grep -q 'name: "rule_id"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'str: "_build/default"' && echo yes
+  $ grep -q 'str: "_build/default"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'str: "_build/default/dep.txt"' && echo yes
+  $ grep -q 'str: "_build/default/dep.txt"' dump.textpb && echo yes
   yes
 
 Per the arg-slimming in doc/dev/trace-graph-perfetto.md (phase 2), `deps`,
@@ -133,47 +182,48 @@ Per the arg-slimming in doc/dev/trace-graph-perfetto.md (phase 2), `deps`,
 longer appear on slices at all -- they are blob-only now (see below). In
 particular, "out.txt" (a `target_files` entry) no longer appears anywhere in
 the plain protobuf text as its own interned string; it only shows up encoded
-inside the blob's `data` payload:
+inside the blob's `data` payload (and, since copy.txt depends on it, as the
+full path "_build/default/out.txt" of a build-dep):
 
-  $ dune trace perfetto --text | grep -q 'name: "target_files"' && echo yes
+  $ grep -q 'name: "target_files"' dump.textpb && echo yes
   [1]
-  $ dune trace perfetto --text | grep -q 'name: "target_dirs"' && echo yes
+  $ grep -q 'name: "target_dirs"' dump.textpb && echo yes
   [1]
-  $ dune trace perfetto --text | grep -q 'name: "deps"' && echo yes
+  $ grep -q 'name: "deps"' dump.textpb && echo yes
   [1]
-  $ dune trace perfetto --text | grep -q 'name: "dyn_deps"' && echo yes
+  $ grep -q 'name: "dyn_deps"' dump.textpb && echo yes
   [1]
-  $ dune trace perfetto --text | grep -q 'name: "forced_by"' && echo yes
+  $ grep -q 'name: "forced_by"' dump.textpb && echo yes
   [1]
-  $ dune trace perfetto --text | grep -q 'str: "out.txt"' && echo yes
+  $ grep -q 'str: "out.txt"' dump.textpb && echo yes
   [1]
 
 Recognised structural fields are grouped under a "dune" dict (surfacing as e.g.
 `debug.dune.dir` in Trace Processor), while unrecognised fields (such as the
 `config` event's own `build_dir`) stay at the top level:
 
-  $ dune trace perfetto --text | grep -q 'name: "dune"' && echo yes
+  $ grep -q 'name: "dune"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "build_dir"' && echo yes
+  $ grep -q 'name: "build_dir"' dump.textpb && echo yes
   yes
 
 `exec-rule-finish`'s outcome and `build-dep-finish`'s outcome kind are now
 plain strings rather than nested tagged-union dicts (`forced_by`'s `kind` tag
 and `dep_outcome`'s dict are gone along with the fields they tagged):
 
-  $ dune trace perfetto --text | grep -q 'name: "outcome"' && echo yes
+  $ grep -q 'name: "outcome"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'str: "executed"' && echo yes
+  $ grep -q 'str: "executed"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "outcome_kind"' && echo yes
+  $ grep -q 'name: "outcome_kind"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'str: "rule"' && echo yes
+  $ grep -q 'str: "rule"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "kind"' && echo yes
+  $ grep -q 'name: "kind"' dump.textpb && echo yes
   [1]
-  $ dune trace perfetto --text | grep -q 'name: "dep_outcome"' && echo yes
+  $ grep -q 'name: "dep_outcome"' dump.textpb && echo yes
   [1]
-  $ dune trace perfetto --text | grep -q 'name: "rule_outcome"' && echo yes
+  $ grep -q 'name: "rule_outcome"' dump.textpb && echo yes
   [1]
 
 Interning is incremental over one sequence: the first participating packet clears
@@ -181,17 +231,17 @@ prior state (`sequence_flags: 3`), the rest only announce they need it
 (`sequence_flags: 2`), and each string is defined exactly once however many
 events reference it:
 
-  $ dune trace perfetto --text | grep -c 'sequence_flags: 3'
+  $ grep -c 'sequence_flags: 3' dump.textpb
   1
-  $ dune trace perfetto --text | grep -c 'str: "_build/default"$'
+  $ grep -c 'str: "_build/default"$' dump.textpb
   1
 
-All three rules are freshly executed, so `str: "executed"` is referenced by
-three `exec-rule-finish` instants but interned only once:
+All rules are freshly executed, so `str: "executed"` is referenced by every
+`exec-rule-finish` instant but interned only once:
 
-  $ dune trace perfetto --text | grep -c 'str: "executed"'
+  $ grep -c 'str: "executed"' dump.textpb
   1
-  $ dune trace perfetto --text | grep -c 'str: "_build/default/dep.txt"'
+  $ grep -c 'str: "_build/default/dep.txt"' dump.textpb
   1
 
 Without `--text` it writes the binary protobuf. The output is a stream of
@@ -210,21 +260,21 @@ tab-separated records on a dedicated "dune-graph" track (see
 doc/dev/trace-graph-perfetto.md), rather than as one args-table row per
 dependency-array element:
 
-  $ dune trace perfetto --text | grep -c 'name: "dune-graph"'
+  $ grep -c 'name: "dune-graph"' dump.textpb
   1
-  $ dune trace perfetto --text | grep -q 'name: "graph-dict"' && echo yes
+  $ grep -q 'name: "graph-dict"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "graph-rules"' && echo yes
+  $ grep -q 'name: "graph-rules"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "graph-deps"' && echo yes
+  $ grep -q 'name: "graph-deps"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "version"' && echo yes
+  $ grep -q 'name: "version"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "seq"' && echo yes
+  $ grep -q 'name: "seq"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "total"' && echo yes
+  $ grep -q 'name: "total"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -q 'name: "data"' && echo yes
+  $ grep -q 'name: "data"' dump.textpb && echo yes
   yes
 
 Each chunk's payload is one `str:` debug-annotation value. Decode the first
@@ -234,8 +284,7 @@ escaping of the record fields intact; real tabs (the record's field
 separator) are then swapped for "~" so a record reads on one line:
 
   $ decode_section() {
-  >   dune trace perfetto --text \
-  >   | grep -A 30 "name: \"$1\"" \
+  >   grep -A 30 "name: \"$1\"" dump.textpb \
   >   | grep -m1 '^ *str: "' \
   >   | sed 's/^ *str: "\(.*\)"$/\1/' \
   >   | { IFS= read -r chunk; printf '%b' "$chunk"; } \
@@ -284,16 +333,17 @@ unsplit run, proving the splitter never breaks a record across a chunk
 boundary:
 
   $ decode_all() {
-  >   dune trace perfetto --text \
-  >   | sed -n 's/^ *str: "\([0-9][0-9]*\\t.*\)"$/\1/p' \
+  >   sed -n 's/^ *str: "\([0-9][0-9]*\\t.*\)"$/\1/p' dump.textpb \
   >   | while IFS= read -r chunk; do printf '%b\n' "$chunk"; done
   > }
-  $ unsplit_chunks=$(dune trace perfetto --text | grep -c '^ *str: "[0-9][0-9]*\\t')
+  $ unsplit_chunks=$(grep -c '^ *str: "[0-9][0-9]*\\t' dump.textpb)
   $ unsplit_records=$(decode_all | wc -l)
   $ export DUNE_TRACE_GRAPH_CHUNK_SIZE=64
-  $ split_chunks=$(dune trace perfetto --text | grep -c '^ *str: "[0-9][0-9]*\\t')
+  $ dune trace perfetto --text > dump.textpb
+  $ split_chunks=$(grep -c '^ *str: "[0-9][0-9]*\\t' dump.textpb)
   $ split_records=$(decode_all | wc -l)
   $ unset DUNE_TRACE_GRAPH_CHUNK_SIZE
+  $ dune trace perfetto --text > dump.textpb
   $ test "$split_chunks" -gt "$unsplit_chunks" && echo yes
   yes
   $ test "$split_records" = "$unsplit_records" && echo yes
@@ -306,6 +356,7 @@ backslash still escaped in the (once-decoded) output:
 
   $ touch 'back\slash.src'
   $ DUNE_TRACE=+graph dune build out.txt
+  $ dune trace perfetto --text > dump.textpb
   $ decode_section graph-dict | grep -c '~_build/default/back\\\\slash.src$'
   1
 
@@ -315,7 +366,14 @@ start/finish args (`dir`, `rule_id`, `async_id`) plus the outcome and
 `dur_ns`, rather than a separate start/finish pair:
 
   $ DUNE_TRACE=+graph dune build out.txt
-  $ dune trace perfetto --text | grep -q 'name: "exec-rule-resolved"' && echo yes
+  $ dune trace perfetto --text > dump.textpb
+  $ grep -q 'name: "exec-rule-resolved"' dump.textpb && echo yes
   yes
-  $ dune trace perfetto --text | grep -qE 'str: "local-cache-hit"|str: "shared-cache-hit"' && echo yes
+  $ grep -qE 'str: "local-cache-hit"|str: "shared-cache-hit"' dump.textpb && echo yes
   yes
+
+Cache hits execute no action, so this trace has no exec-rule-action slices --
+and no lane tracks either:
+
+  $ grep -q 'name: "exec-rule-action"' dump.textpb && echo yes
+  [1]

@@ -11,10 +11,15 @@ module Exec_rule : sig
   (** Trace the execution of [rule] as an "exec-rule" async span. [f] is handed
       a [finish] callback to emit the span's end, passing the resolved [deps],
       the dynamic dependencies [dyn_deps] (one dep set per dynamic-deps stage),
-      and the execution [outcome]. *)
+      and the execution [outcome]. [f] is also handed a [trace_action] wrapper
+      to run the rule's action execution proper under a nested
+      "exec-rule-action" span (sharing the rule's async id); cache hits execute
+      no action and so never call it. *)
   val start
     :  rule:Rule.t
-    -> ((deps:Dep.Set.t -> dyn_deps:Dep.Set.t list -> outcome -> unit) -> 'a Memo.t)
+    -> (finish:(deps:Dep.Set.t -> dyn_deps:Dep.Set.t list -> outcome -> unit)
+        -> trace_action:((unit -> 'b Fiber.t) -> 'b Fiber.t)
+        -> 'a Memo.t)
     -> 'a Memo.t
 end
 

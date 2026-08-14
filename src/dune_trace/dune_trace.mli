@@ -354,6 +354,15 @@ module Event : sig
         -> t list
     end
 
+    module Exec_rule_action : sig
+      (* Span for the execution of a rule's action proper (real work, bounded
+         by [-j]). It shares its rule's "exec-rule" [async_id] so the pair
+         nests inside the rule's span; both also carry [rule_id]. Only
+         executed rules have one -- cache hits execute no action. *)
+      val start : async_id:async_id -> rule_id:int -> start:Time.t -> t
+      val finish : async_id:async_id -> t
+    end
+
     module Dynamic_includes : sig
       val start : async_id:async_id -> dune_file:Path.Source.t -> start:Time.t -> t
       val finish : async_id:async_id -> t

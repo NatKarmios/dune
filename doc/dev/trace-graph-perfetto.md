@@ -1,6 +1,6 @@
 # Graph trace: Perfetto export redesign
 
-Status: phase 1 implemented; phases 2-5 planned. This document is the
+Status: phases 1-3 implemented; phases 4-5 planned. This document is the
 working plan; it is intended to be executed phase by phase over multiple
 agent sessions. Each phase is independently committable and must pass
 `dune build @check @fmt @runtest` (scope test runs to
@@ -317,7 +317,7 @@ Implementation notes / deviations from the schema as originally drafted:
   run on Windows CI (`test/blackbox-tests/test-cases/dune`'s
   `runtest-windows` alias only allowlists two unrelated tests).
 
-### Phase 3 — `exec-rule-action` duration spans (dune-side + converter)
+### Phase 3 — `exec-rule-action` duration spans (dune-side + converter) — **implemented**
 
 - Dune side: new begin/end async event pair in
   `src/dune_trace/event.ml`/`.mli` (`Graph.Exec_rule_action`), **sharing
@@ -347,6 +347,29 @@ Implementation notes / deviations from the schema as originally drafted:
   existing pairing assertion ("exactly one begin and one end per
   async_id" over `exec-*` events) must now group by *(name, async_id)*.
   `perfetto.t` for lane reuse (track count stays small) and slice type.
+
+Implementation notes / deviations from the schema as originally drafted:
+
+- [f]'s handles are labeled arguments (`~finish` and `~trace_action`); the
+  wrapper takes a thunk (`(unit -> 'b Fiber.t) -> 'b Fiber.t`) so the begin
+  is emitted when the wrapped fiber actually starts, not when it is built.
+- An action begin left unmatched at EOF (crash/interrupt mid-action) is left
+  as an open `SLICE_BEGIN` on its lane — trace_processor renders unterminated
+  slices to the end of the trace, which is the honest reading — rather than
+  synthesised into a `-start` instant like the instant-pair kinds.
+- If the action fails (build error), neither the action end nor the rule's
+  end is emitted; both surface via the unfinished-span paths above.
+- `perfetto.t`'s lane assertions are invariants (begins = ends; lanes <
+  slices), not exact counts: besides the project rules, a fresh build also
+  executes internal rules (context configurator probes, copy-to-build-dir
+  rules for in-project source deps) whose actions can overlap, so the lane
+  count is only bounded by actual concurrency, not fixed. The test's project
+  rules form a dep chain, guaranteeing at least one lane reuse.
+- `perfetto.t` now captures `dune trace perfetto --text` to a file once per
+  build and greps that: cram runs bash with `pipefail`, and the dump has
+  grown past the pipe buffer, so a `grep -q` exiting early would kill the
+  producer with SIGPIPE (observed as exit 141) — a latent problem this
+  phase's extra output exposed.
 
 ### Phase 4 — lifecycle flows
 

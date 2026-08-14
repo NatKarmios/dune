@@ -531,7 +531,7 @@ module Internal = struct
 
   and execute_rule_impl ~rule_kind rule =
     Graph_trace.Exec_rule.start ~rule
-    @@ fun finish ->
+    @@ fun ~finish ~trace_action ->
     let { Rule.id = _; targets; mode; action; info = _; loc } = rule in
     let head_target = Targets.Validated.head targets in
     let* execution_parameters =
@@ -675,15 +675,16 @@ module Internal = struct
             | None ->
               (* Step IV. Execute the build action. *)
               let* exec_result =
-                execute_action_for_rule
-                  ~rule_kind
-                  ~rule_digest
-                  ~action
-                  ~facts
-                  ~loc
-                  ~execution_parameters
-                  ~sandbox_mode
-                  ~targets
+                trace_action (fun () ->
+                  execute_action_for_rule
+                    ~rule_kind
+                    ~rule_digest
+                    ~action
+                    ~facts
+                    ~loc
+                    ~execution_parameters
+                    ~sandbox_mode
+                    ~targets)
               in
               (* Step V. Examine produced targets and store them to the shared
                  cache if needed. *)

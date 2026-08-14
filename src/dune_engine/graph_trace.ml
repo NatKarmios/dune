@@ -169,10 +169,18 @@ module Exec_rule = struct
 
   (* [f] is handed a [finish] callback, called once the rule's execution has
      resolved its [deps] and [dyn_deps] and produced an [outcome], to emit the
-     matching "exec-rule" end. *)
+     matching "exec-rule" end. It is also handed a [trace_action] wrapper that
+     emits an "exec-rule-action" begin/end pair around the action's execution
+     fiber; the pair shares the rule's [async_id], so it nests inside the
+     rule's span. [Build_system] applies it to the action execution proper
+     (Step IV, after both cache lookups), so the span exists only for executed
+     rules. *)
   let start
         ~(rule : Rule.t)
-        (f : (deps:Dep.Set.t -> dyn_deps:Dep.Set.t list -> outcome -> unit) -> 'a Memo.t)
+        (f :
+          finish:(deps:Dep.Set.t -> dyn_deps:Dep.Set.t list -> outcome -> unit)
+          -> trace_action:((unit -> 'b Fiber.t) -> 'b Fiber.t)
+          -> 'a Memo.t)
     : 'a Memo.t
     =
     if enabled Category.Graph
@@ -187,9 +195,19 @@ module Exec_rule = struct
        let finish ~deps ~dyn_deps outcome =
          Emit.finish ~async_id ~rule_id ~deps ~dyn_deps outcome
        in
-       Forced_by.set ~new_forcer f finish)
+       let trace_action action =
+         let start = Time.now () in
+         Dune_trace.emit ~buffered:true Category.Graph (fun () ->
+           Graph.Exec_rule_action.start ~async_id ~rule_id ~start);
+         let+ result = action () in
+         Dune_trace.emit ~buffered:true Category.Graph (fun () ->
+           Graph.Exec_rule_action.finish ~async_id);
+         result
+       in
+       Forced_by.set ~new_forcer (fun () -> f ~finish ~trace_action) ())
       |> Memo.of_reproducible_fiber)
-    else f (fun ~deps:_ ~dyn_deps:_ _ -> ())
+    else
+      f ~finish:(fun ~deps:_ ~dyn_deps:_ _ -> ()) ~trace_action:(fun action -> action ())
   ;;
 end
 

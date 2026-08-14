@@ -1264,6 +1264,26 @@ module Graph = struct
     ;;
   end
 
+  module Exec_rule_action = struct
+    (* Span for the execution of a rule's action proper (Step IV in
+       [Dune_engine.Build_system]) -- real work, bounded by [-j]. It shares
+       its rule's "exec-rule" [async_id], so the begin/end pair nests inside
+       the rule's span; the two spans are told apart by their name. Cache
+       hits execute no action, so no span is emitted for them. *)
+    let start ~async_id ~rule_id ~start =
+      Event.async_begin
+        ~args:[ "rule_id", Arg.int rule_id ]
+        ~async_id
+        ~name:"exec-rule-action"
+        start
+        Graph
+    ;;
+
+    let finish ~async_id =
+      Event.async_end ~async_id ~name:"exec-rule-action" (Time.now ()) Graph
+    ;;
+  end
+
   module Dynamic_includes = struct
     let start ~async_id ~dune_file ~start =
       Event.async_begin
