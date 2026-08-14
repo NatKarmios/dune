@@ -133,6 +133,12 @@ On track `build-dep`:
 - `build-dep-resolved`: collapsed form used when the dep is a source
   file; union of the above args.
 
+On the pooled `exec-rule-action` lanes (executed rules only):
+
+- `exec-rule-action`: true duration slice (Begin/End); `rule_id` (int),
+  `async_id` (int, **same value as the rule's lifecycle instants** — the
+  join key between an action slice and its rule).
+
 On tracks `gen-rules` / `dynamic-includes`:
 
 - `gen-rules-start` / `-finish`: `dir` (string), `dune_file` (string, on
@@ -314,31 +320,41 @@ Implementation notes / deviations from the schema as originally drafted:
 ### Phase 3 — `exec-rule-action` duration spans (dune-side + converter)
 
 - Dune side: new begin/end async event pair in
-  `src/dune_trace/event.ml`/`.mli` (`Graph.Exec_rule_action`), emitted
-  from a new wrapper in `src/dune_engine/graph_trace.ml`, hooked in
-  `src/dune_engine/build_system.ml` around `execute_action_for_rule`
-  (Step IV — after both cache lookups, so spans exist only for executed
-  rules). Args: `rule_id`. Fresh `async_id` (do not reuse the exec-rule
-  span's id: sharing an id would attach these to the same Chrome async
-  chain; pairing with the rule is via `rule_id`).
+  `src/dune_trace/event.ml`/`.mli` (`Graph.Exec_rule_action`), **sharing
+  the exec-rule span's `async_id`** so the pair nests inside the rule's
+  span as a Chrome nestable-async chain (this is the documented semantics
+  of same-id begin/end pairs in `event.ml`, and `--chrome-trace` output
+  renders the nesting with no extra work). Integrate into the existing
+  `Exec_rule` helper in `src/dune_engine/graph_trace.ml` rather than
+  adding a sibling module: `Exec_rule.start` owns the async_id, so extend
+  what it hands to `f` with an action-wrapping function (alongside the
+  existing `finish` callback) that emits the begin/end around a given
+  fiber. This keeps the id encapsulated and makes the nesting invariant
+  structural — an action span can only open inside its rule's span. Hook
+  the wrapper in `src/dune_engine/build_system.ml` around
+  `execute_action_for_rule` (Step IV — after both cache lookups, so spans
+  exist only for executed rules). Args: `rule_id` (kept for direct
+  SQL/plugin joins even though the shared id implies it).
 - Converter: render as real Begin/End slices on pooled lanes — maintain a
   free-list of track uuids, all named `exec-rule-action`; pop on begin,
-  push back on end; track `async_id → lane` while open. Pool size is
-  bounded by `-j` in practice. Anything later added semantically inside
-  the action (sandbox phases, process run) may share the lane track:
-  temporal containment there is real, so stack nesting is correct.
+  push back on end; key the open-span table by *(event name, async_id)*
+  since the id is now shared with the rule's lifecycle events. Pool size
+  is bounded by `-j` in practice. Anything later added semantically
+  inside the action (sandbox phases, process run) may share the lane
+  track: temporal containment there is real, so stack nesting is correct.
 - Tests: `graph-events.t` for the new csexp events (begin/end pairing,
-  only on executed rules — rebuild from cache produces none);
+  only on executed rules — rebuild from cache produces none). The
+  existing pairing assertion ("exactly one begin and one end per
+  async_id" over `exec-*` events) must now group by *(name, async_id)*.
   `perfetto.t` for lane reuse (track count stays small) and slice type.
 
 ### Phase 4 — lifecycle flows
 
 - Allocate a fresh flow id per non-collapsed span when its begin is
   buffered; set `flow_ids` on the start instant, the matching
-  `exec-rule-action` Begin slice (looked up via `rule_id` — the action
-  always begins after the rule's begin and ends before its end, and rule
-  execution is memoized so at most one action span per `rule_id` is open),
-  and the finish instant. `Dune_perfetto.Event.create ~flow_ids` and the
+  `exec-rule-action` Begin slice (trivially looked up: it shares the
+  rule's `async_id`, and the action always begins after the rule's begin
+  and ends before its end), and the finish instant. `Dune_perfetto.Event.create ~flow_ids` and the
   field-47 serialisation already exist.
 - This requires action slices to be constructed at action-*end* time (so
   the begin can carry the flow id); the converter already buffers all
