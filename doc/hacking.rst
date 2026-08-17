@@ -191,10 +191,11 @@ replace timing values that vary between runs:
 
 ``dune trace perfetto`` converts the trace to Perfetto's native protobuf
 format (``--text`` emits a human-readable dump, useful in cram tests). When
-the ``graph`` category is enabled, build-graph spans become lifecycle
-instants on per-kind tracks, action executions become duration slices, and
-the graph structure itself (targets, dependency edges, forced-by
-attribution) is packed into a chunked blob on a ``dune-graph`` track. The
+the ``graph`` category is enabled, build-graph spans (action executions
+included) become lifecycle instants on per-kind tracks, carrying only the id
+that keys their record in the blob and how long the span took; the graph
+structure itself (targets, dependency edges, forced-by attribution, rule
+outcomes) is packed into a chunked blob on a ``dune-graph`` track. The
 converter's output schema — the contract consumed by the Perfetto UI
 plugin — is specified in ``doc/dev/trace-graph-perfetto.md``.
 

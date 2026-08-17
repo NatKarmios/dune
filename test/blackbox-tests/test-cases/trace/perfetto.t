@@ -64,7 +64,10 @@ main thread, the graph blob, and the four kind tracks:
   yes
 
 Each kind's lifecycle is a start instant (at the begin timestamp) and a
-finish instant carrying `dur_ns`, paired by a shared `async_id`:
+finish instant carrying `dur_ns`. The csexp `async_id` that pairs a begin
+with its end is converter bookkeeping and does not survive into the output:
+what pairs the instants downstream is the id keying the span's graph-blob
+record (`rule_id` / `dep_id`, see below):
 
   $ grep -q 'type: TYPE_INSTANT' dump.textpb && echo yes
   yes
@@ -81,7 +84,7 @@ finish instant carrying `dur_ns`, paired by a shared `async_id`:
   $ grep -q 'name: "gen-rules-finish"' dump.textpb && echo yes
   yes
   $ grep -q 'name: "async_id"' dump.textpb && echo yes
-  yes
+  [1]
   $ grep -q 'name: "dur_ns"' dump.textpb && echo yes
   yes
 
@@ -108,15 +111,18 @@ rather than a project source file (which would resolve through dune's
 implicit copy-to-build-dir rule, i.e. the "rule" outcome, not this one) --
 so its build-dep resolves as `is-source`, the other collapsed case besides
 an exec-rule cache hit, producing a single `build-dep-resolved` instant
-instead of a start/finish pair:
+instead of a start/finish pair. The resolution itself is not on the instant
+-- the collapse is the only trace of it here, and the blob records it as `s`
+(asserted below):
 
   $ grep -q 'name: "build-dep-resolved"' dump.textpb && echo yes
   yes
   $ grep -q 'str: "is-source"' dump.textpb && echo yes
-  yes
+  [1]
 
 An executed rule's action execution is its own span (exec-rule-action,
-sharing the rule's async_id), and gets a lifecycle pair like the other kinds.
+sharing the rule's async_id in the csexp), and gets a lifecycle pair like the
+other kinds.
 It is not bounded by -j -- the throttle is acquired per-process, below this
 span -- so an arbitrary number of actions can be open at once, and instants
 are what lets them all share one track (see doc/dev/trace-graph-perfetto.md,
@@ -153,12 +159,30 @@ own name, 8 for a `dune` dict entry (6 is the dict itself):
   >   ' dump.textpb
   > }
 
-Both action instants are on the graph track as instants, joined to their rule
-by the `async_id` they share with it, and the finish carries `dur_ns`:
+An instant carries only what the blob cannot supply: the id keying its blob
+record, and (on a finish or a collapsed instant) `dur_ns`, which is timing
+rather than structure. So the action instants are joined to their rule by
+`rule_id`, and the rule's outcome and the dep's resolution -- both blob
+fields -- are not repeated here:
 
-  $ event_args | sort -u | grep '^exec-rule-action-'
-  exec-rule-action-finish TYPE_INSTANT async_id,dur_ns,rule_id
-  exec-rule-action-start TYPE_INSTANT async_id,rule_id
+  $ event_args | sort -u | grep '^exec-rule'
+  exec-rule-action-finish TYPE_INSTANT rule_id,dur_ns
+  exec-rule-action-start TYPE_INSTANT rule_id
+  exec-rule-finish TYPE_INSTANT rule_id,dur_ns
+  exec-rule-start TYPE_INSTANT rule_id
+  $ event_args | sort -u | grep '^build-dep'
+  build-dep-finish TYPE_INSTANT dep_id,dur_ns
+  build-dep-resolved TYPE_INSTANT dep_id,dur_ns
+  build-dep-start TYPE_INSTANT dep_id
+
+gen-rules and dynamic-includes have no blob record, so they keep the path
+that identifies them (`dir`, and the `dune_file` a standalone/group-root
+directory's rules come from -- other directories' finishes have none):
+
+  $ event_args | sort -u | grep '^gen-rules'
+  gen-rules-finish TYPE_INSTANT dune_file,dur_ns
+  gen-rules-finish TYPE_INSTANT dur_ns
+  gen-rules-start TYPE_INSTANT dir
 
 Starts and finishes balance (the exact count isn't stable: besides the three
 project rules, a fresh build also executes internal rules such as the
@@ -240,33 +264,38 @@ track events by id (`name_iid` / `category_iids`), and defined once in an
   $ grep -q 'name: "exec-rule"' dump.textpb && echo yes
   yes
 
-The lifecycle instants' fields become debug annotations, with `dir`/`dep`
-resolved from their interned ids to readable paths at the time the matching
-end is seen. The annotation names and string values are themselves interned
-(`name_iid` / `string_value_iid`):
+The lifecycle instants' fields become debug annotations. The annotation names
+and string values are themselves interned (`name_iid` /
+`string_value_iid`). The ids on exec-rule/build-dep instants are left as the
+intern ids they arrive as -- the blob's dict is what resolves them -- so no
+target or dep path is interned as a string of its own here; gen-rules' `dir`
+is a plain path in the event, not an interned id, and stays one:
 
   $ grep -q 'debug_annotation_names {' dump.textpb && echo yes
   yes
   $ grep -q 'debug_annotation_string_values {' dump.textpb && echo yes
   yes
-  $ grep -q 'name: "dir"' dump.textpb && echo yes
+  $ grep -q 'name: "rule_id"' dump.textpb && echo yes
+  yes
+  $ grep -q 'name: "dep_id"' dump.textpb && echo yes
   yes
   $ grep -q 'name: "dep"' dump.textpb && echo yes
-  yes
-  $ grep -q 'name: "rule_id"' dump.textpb && echo yes
+  [1]
+  $ grep -q 'name: "dir"' dump.textpb && echo yes
   yes
   $ grep -q 'str: "_build/default"' dump.textpb && echo yes
   yes
   $ grep -q 'str: "_build/default/dep.txt"' dump.textpb && echo yes
-  yes
+  [1]
 
-Per the arg-slimming in doc/dev/trace-graph-perfetto.md (phase 2), `deps`,
-`dyn_deps`, `target_files`, `target_dirs`, `forced_by`, and expansion lists no
-longer appear on slices at all -- they are blob-only now (see below). In
-particular, "out.txt" (a `target_files` entry) no longer appears anywhere in
-the plain protobuf text as its own interned string; it only shows up encoded
-inside the blob's `data` payload (and, since copy.txt depends on it, as the
-full path "_build/default/out.txt" of a build-dep):
+Per the arg-slimming in doc/dev/trace-graph-perfetto.md (phases 2 and 7),
+`deps`, `dyn_deps`, `target_files`, `target_dirs`, `forced_by`, and expansion
+lists no longer appear on instants at all -- they are blob-only now (see
+below). In particular, "out.txt" (a `target_files` entry) no longer appears
+anywhere in the plain protobuf text as its own interned string; it only shows
+up encoded inside the blob's `data` payload. Its full path is still interned
+once, but as a *user-requested* target on the `targets` event -- those are
+real paths in the event, not intern ids, and are not part of the graph:
 
   $ grep -q 'name: "target_files"' dump.textpb && echo yes
   [1]
@@ -280,6 +309,8 @@ full path "_build/default/out.txt" of a build-dep):
   [1]
   $ grep -q 'str: "out.txt"' dump.textpb && echo yes
   [1]
+  $ grep -c 'str: "_build/default/out.txt"' dump.textpb
+  1
 
 Recognised structural fields are grouped under a "dune" dict (surfacing as e.g.
 `debug.dune.dir` in Trace Processor), while unrecognised fields (such as the
@@ -290,24 +321,32 @@ Recognised structural fields are grouped under a "dune" dict (surfacing as e.g.
   $ grep -q 'name: "build_dir"' dump.textpb && echo yes
   yes
 
-`exec-rule-finish`'s outcome and `build-dep-finish`'s outcome kind are now
-plain strings rather than nested tagged-union dicts (`forced_by`'s `kind` tag
-and `dep_outcome`'s dict are gone along with the fields they tagged):
+A rule's outcome and a dep's resolution are blob fields, so neither the
+tagged-union dicts of the csexp events (`rule_outcome`, `dep_outcome`,
+`forced_by`'s `kind` tag) nor the flattened strings that replaced them in
+phase 2 (`outcome`, `outcome_kind`) reach the instants:
 
-  $ grep -q 'name: "outcome"' dump.textpb && echo yes
-  yes
   $ grep -q 'str: "executed"' dump.textpb && echo yes
-  yes
+  [1]
   $ grep -q 'name: "outcome_kind"' dump.textpb && echo yes
-  yes
+  [1]
   $ grep -q 'str: "rule"' dump.textpb && echo yes
-  yes
+  [1]
   $ grep -q 'name: "kind"' dump.textpb && echo yes
   [1]
   $ grep -q 'name: "dep_outcome"' dump.textpb && echo yes
   [1]
   $ grep -q 'name: "rule_outcome"' dump.textpb && echo yes
   [1]
+
+The one surviving `outcome` annotation belongs to the `build` category's
+`build-finish` event (success/failure of the whole build), not to a graph
+instant:
+
+  $ grep -q 'name: "outcome"' dump.textpb && echo yes
+  yes
+  $ grep -q 'str: "success"' dump.textpb && echo yes
+  yes
 
 Interning is incremental over one sequence: the first participating packet clears
 prior state (`sequence_flags: 3`), the rest only announce they need it
@@ -319,13 +358,14 @@ events reference it:
   $ grep -c 'str: "_build/default"$' dump.textpb
   1
 
-All rules are freshly executed, so `str: "executed"` is referenced by every
-`exec-rule-finish` instant but interned only once:
+`_build/default` above is one such string, named by every `gen-rules-start`
+in the default context. Paths that arrive as intern ids (rule dirs, deps) are
+no longer resolved onto instants, so they are not in the string pool at all
+-- the blob's dict is their only copy:
 
-  $ grep -c 'str: "executed"' dump.textpb
-  1
   $ grep -c 'str: "_build/default/dep.txt"' dump.textpb
-  1
+  0
+  [1]
 
 Without `--text` it writes the binary protobuf. The output is a stream of
 length-delimited Trace.packet fields, so it begins with the tag for field 1,
@@ -409,6 +449,32 @@ expanded members, also by dict id rather than full paths ("x<id,id,...>"):
   $ decode_section graph-deps | grep -qE "^$glob_id~x[0-9]+(,[0-9]+)*~" && echo yes
   yes
 
+The /etc/hosts dep, collapsed to a `build-dep-resolved` instant above, is the
+"s" case:
+
+  $ decode_section graph-deps | grep -qE '^[0-9]+~s~' && echo yes
+  yes
+
+A record's key is exactly what its instants carry: `dep_id` on a build-dep
+instant is the dict id the `graph-deps` record starts with, so the timeline
+and the graph join without a pairing table. Instant args are ints, and
+`dep_id` is the only one on a `build-dep-start`, so the first `int_value` of
+each such event is its dep:
+
+  $ first_int_arg() {
+  >   awk -v want="$1" '
+  >     /^ *event_names \{/ { tbl = 1; next }
+  >     tbl && $1 == "iid:" { iid = $2; next }
+  >     tbl && $1 == "name:" { gsub(/"/, "", $2); ename[iid] = $2; tbl = 0; next }
+  >     /^  track_event \{/ { n++ }
+  >     /^    name_iid: / { eid[n] = $2 }
+  >     /^        int_value: / { if (arg[n] == "") arg[n] = $2 }
+  >     END { for (i = 1; i <= n; i++) if (ename[eid[i]] == want) print arg[i] }
+  >   ' dump.textpb
+  > }
+  $ first_int_arg build-dep-start | sort -u | grep -qx "$dep_id" && echo yes
+  yes
+
 Overriding the chunk size (bytes) via `DUNE_TRACE_GRAPH_CHUNK_SIZE` forces
 several chunks per section without needing a multi-megabyte trace. The total
 record count across all chunks of the graph blob must stay the same as the
@@ -445,14 +511,17 @@ backslash still escaped in the (once-decoded) output:
 
 A no-op rebuild (nothing changed since the last build) produces a cache hit,
 collapsed to a single `exec-rule-resolved` instant carrying the union of the
-start/finish args (`dir`, `rule_id`, `async_id`) plus the outcome and
-`dur_ns`, rather than a separate start/finish pair:
+start/finish args (`rule_id` and `dur_ns`) rather than a separate
+start/finish pair. Which kind of cache hit it was is a blob field ("L" local,
+"S" shared), not an annotation:
 
   $ DUNE_TRACE=+graph dune build out.txt
   $ dune trace perfetto --text > dump.textpb
-  $ grep -q 'name: "exec-rule-resolved"' dump.textpb && echo yes
-  yes
+  $ event_args | sort -u | grep '^exec-rule-resolved'
+  exec-rule-resolved TYPE_INSTANT rule_id,dur_ns
   $ grep -qE 'str: "local-cache-hit"|str: "shared-cache-hit"' dump.textpb && echo yes
+  [1]
+  $ decode_section graph-rules | grep -qE '~[LS]~' && echo yes
   yes
 
 The collapsed instants carry no flow here either (the rebuild's build-dep

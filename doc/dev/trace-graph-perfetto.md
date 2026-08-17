@@ -1,6 +1,6 @@
 # Graph trace: Perfetto export redesign
 
-Status: phases 1–6 **implemented**. This document started as the working
+Status: phases 1–7 **implemented**. This document started as the working
 plan, executed phase by phase over multiple agent sessions, and serves as
 the reference for the converter's design and plugin-facing schema. The
 "Plugin-facing schema (v1)" section is the contract; bump `version` on
@@ -71,6 +71,15 @@ crash-safe and streamable — except for one dune-side addition
    `Process.run`, below this hook), so the span includes scheduler
    queueing and peak concurrency is the ready set — the observation that
    forced the phase 6 revision. Cache-hit rules have no action span.
+7. **An instant carries only its blob record's key and `dur_ns`** (phase 7).
+   The key is `rule_id` for the rule kinds and `dep_id` (an intern id) for
+   `build-dep`; `dur_ns` is the one thing the blob does not hold, being
+   timing rather than structure. Outcomes, resolutions, and the paths behind
+   the ids are one blob lookup away, so repeating them per instant only buys
+   args-table rows. The csexp `async_id` is not emitted at all: it is
+   converter-internal pairing state, and the plugin joins on the blob keys.
+   `gen-rules`/`dynamic-includes` have no blob record and so keep the path
+   that identifies them.
 
 Perfetto ground rules this design leans on:
 
@@ -116,54 +125,61 @@ today's converter output).
 
 ### Lifecycle instants
 
+An instant carries the key of its span's blob record and, once an interval
+has been measured, `dur_ns` (int, nanoseconds) — nothing else. The csexp's
+`async_id` is not emitted; it pairs begin with end inside the converter only.
+An id that fails to parse as an int (malformed trace) is omitted, and an
+instant left with no args emits no `dune` dict at all.
+
 On track `exec-rule`:
 
-- `exec-rule-start`: `rule_id` (int), `async_id` (int), `dir` (string,
-  resolved path).
-- `exec-rule-finish`: `rule_id`, `async_id`, `outcome`
-  (`"executed" | "local-cache-hit" | "shared-cache-hit"`), `dur_ns` (int).
-- `exec-rule-resolved`: collapsed form used when outcome is a cache hit;
-  placed at the begin timestamp; carries the union of the above args.
+- `exec-rule-start`: `rule_id` (int).
+- `exec-rule-finish`: `rule_id`, `dur_ns`.
+- `exec-rule-resolved`: collapsed form used when the outcome is a cache hit;
+  placed at the begin timestamp; `rule_id`, `dur_ns`. Which outcome it was
+  (`X`/`L`/`S`) is in `graph-rules`.
 
 On track `build-dep`:
 
-- `build-dep-start`: `dep` (string, resolved), `async_id`.
-- `build-dep-finish`: `async_id`, `dur_ns`, and the outcome kind:
-  `rule_id` (int) when the dep resolved to a rule; `outcome_kind`
-  (`"rule" | "expanded" | "is-source"`). Expansion contents are in the
-  blob (`graph-deps`), not on the slice.
-- `build-dep-resolved`: collapsed form used when the dep is a source
-  file; union of the above args.
+- `build-dep-start`: `dep_id` (int) — the dep's intern id, resolved via
+  `graph-dict`, and the key its `graph-deps` record starts with.
+- `build-dep-finish`: `dep_id`, `dur_ns`.
+- `build-dep-resolved`: collapsed form used when the dep is a source file;
+  `dep_id`, `dur_ns`. What the dep resolved to — producing rule, expansion
+  contents, or source — is in `graph-deps`.
 
 On track `exec-rule-action` (executed rules only):
 
-- `exec-rule-action-start`: `rule_id` (int), `async_id` (int, **same
-  value as the rule's lifecycle instants** — the join key between an
-  action and its rule).
-- `exec-rule-action-finish`: `rule_id`, `async_id`, `dur_ns` (int).
+- `exec-rule-action-start`: `rule_id` (int) — the join key between an action
+  and its rule (they share an `async_id` in the csexp, which is not
+  emitted).
+- `exec-rule-action-finish`: `rule_id`, `dur_ns`.
 
 Note the action interval includes scheduler queueing (`-j` is enforced
 per-process, below this span), so it measures "action in flight", not
 worker occupancy; the `process` events carry the throttled run intervals
 and per-process `queued` durations.
 
-On tracks `gen-rules` / `dynamic-includes`:
+On tracks `gen-rules` / `dynamic-includes` (no blob record, so these keep the
+path that identifies them; both are plain paths in the csexp event, not
+intern ids):
 
-- `gen-rules-start` / `-finish`: `dir` (string), `dune_file` (string, on
-  finish when known), `dur_ns` (on finish), `async_id`.
-- `dynamic-includes-start` / `-finish`: `dune_file` (string), `dur_ns`
-  (on finish), `async_id`.
+- `gen-rules-start`: `dir` (string). `gen-rules-finish`: `dune_file`
+  (string, when known), `dur_ns`.
+- `dynamic-includes-start`: `dune_file` (string).
+  `dynamic-includes-finish`: `dur_ns`.
 
-`target_files`, `target_dirs`, `deps`, `dyn_deps`, `forced_by`, and
-expansion lists **no longer appear on slices**; they are in the blob.
+`target_files`, `target_dirs`, `deps`, `dyn_deps`, `forced_by`, expansion
+lists, `outcome`, `outcome_kind`, and the resolved `dir`/`dep` paths **no
+longer appear on instants**; they are in the blob.
 
 A fresh `flow_ids` value per non-collapsed span chains its lifecycle:
 `exec-rule-start` → `exec-rule-action-start` → `exec-rule-action-finish`
 → `exec-rule-finish` for executed rules; plain start → finish for
 `build-dep`, `gen-rules`, and `dynamic-includes` (and for exec-rule
 spans where no action ran). Collapsed instants carry no flow. The flow
-is a stock-UI affordance; the plugin pairs via `async_id`/`rule_id`
-args and should not depend on flows.
+is a stock-UI affordance; the plugin pairs via the `rule_id`/`dep_id` args
+and should not depend on flows.
 
 ### Graph blob
 
@@ -175,8 +191,9 @@ event names, each carrying args: `version` (int, `1`), `seq` (int,
 Payloads are line-oriented (`\n`-separated records, `\t`-separated
 fields). Strings escape `\\`, `\t`, `\n` C-style. Integer lists are
 `,`-separated. All `<*_id>` values referring to paths/deps are intern ids
-resolved via `graph-dict`; `rule_id` is the rule's own id (same value as
-the slice arg — this is the join key between timeline and graph).
+resolved via `graph-dict`; `rule_id` is the rule's own id. Each record's
+leading id is also the arg its span's instants carry (`rule_id` /
+`dep_id`) — that is the join key between timeline and graph.
 
 - `graph-dict` — the intern table:
 
@@ -270,6 +287,10 @@ Implementation notes / deviations from the schema as originally drafted:
 
 ### Phase 2 — spans → instants, per-kind tracks, arg slimming — **implemented**
 
+*The arg set kept here is slimmed further by phase 7 (`async_id`, `dir`
+/`dep`, `outcome`, and `outcome_kind` all go); the track and buffering
+scheme is unchanged.*
+
 - Replace the per-span `ensure_async_track` scheme with fixed per-kind
   tracks; delete `seen_async`/`async_uuid` as such.
 - Buffer begins keyed by `async_id`; emit start/finish (or collapsed)
@@ -293,7 +314,8 @@ Implementation notes / deviations from the schema as originally drafted:
   never declares that track, rather than always declaring all four.
 - gen-rules/dynamic-includes finish instants do not repeat their start-only
   identifying field (`dir` / `dune_file` respectively): only `dune_file` (for
-  gen-rules, when known), `dur_ns`, and `async_id` are on the finish. This
+  gen-rules, when known), `dur_ns`, and `async_id` (dropped by phase 7) are
+  on the finish. This
   mirrors exec-rule's asymmetry (`dir` is start-only there too) and was a
   reading of the schema table's compressed "start / finish" row, which did
   not spell out which fields belong to which side.
@@ -303,7 +325,8 @@ Implementation notes / deviations from the schema as originally drafted:
   `"rule"`. The schema's phrasing ("the outcome kind: `rule_id` (int) when
   the dep resolved to a rule; `outcome_kind` (...)") was ambiguous between
   this and an either/or; the implemented form keeps the arg set
-  self-describing without a join.
+  self-describing without a join. *(Superseded by phase 7: the resolution is
+  blob-only, so neither arg is emitted.)*
 - `exec-rule`'s `rule_id`/`build-dep`'s `rule_id` (when present) degrade to
   omitting the arg (rather than a `"?"` placeholder) if the underlying
   atom fails to parse as an int; this can only happen on a malformed trace
@@ -313,7 +336,8 @@ Implementation notes / deviations from the schema as originally drafted:
   `exec-rule`'s `rule_outcome` fallback. An earlier version of this dropped
   the perfetto instants silently in this case while still emitting a `"?"`
   graph-blob line, so the blob and the slice track could disagree on
-  whether the span existed; caught in review before landing.
+  whether the span existed; caught in review before landing. *(Phase 7 drops
+  the arg; the "not a source dep, so emit the pair" fallback stays.)*
 - `perfetto.t`'s test project depends on `/etc/hosts` (outside the
   workspace, following the precedent in
   `melange/emit-with-runtime-deps-edge-cases.t`) to exercise
@@ -544,6 +568,60 @@ Implementation notes / deviations from the schema as originally drafted:
   was the phase 3 misreading this phase corrects, so it is fixed there too
   (the dune-side events themselves are unchanged).
 
+### Phase 7 — instants carry ids only (converter-only) — **implemented**
+
+Motivation: after phase 2 the instants still repeated data the blob already
+carries — a resolved `dir`/`dep` path, the rule's `outcome`, the dep's
+`outcome_kind` and producing `rule_id` — plus an `async_id` nothing
+downstream reads (Perfetto pairs nothing on it; the plugin joins on the blob
+keys). Every one of those is an args-table row per instant, and the resolved
+paths additionally pull a string-pool entry per distinct path, for data one
+blob lookup already answers.
+
+Changes (dune-side events are untouched; the blob format is unchanged, so
+`version` stays `1` — the v1 contract has not shipped to the plugin yet, and
+the schema section above is the contract as of landing):
+
+- Drop `async_id` from every emitted instant. The `~async_id` parameter goes
+  with it from the `emit_*_end`/`push_action_start` functions; the buffering
+  tables and the EOF flush's sort-by-`async_id` are unaffected.
+- Drop `dir` from exec-rule instants, `outcome` from `exec-rule-finish`
+  /`-resolved`, and `outcome_kind` + the dep's `rule_id` from
+  `build-dep-finish`/`-resolved`. The rule's outcome is still read at the end
+  event — it decides the collapse — but only the blob records it.
+- `build-dep` instants carry `dep_id` (the dep's intern id, raw as it arrives)
+  instead of the resolved `dep` string: it is the key of the span's
+  `graph-deps` record, so it plays the role `rule_id` plays for rules.
+- `resolve_id` is gone: nothing resolves intern ids into instants any more,
+  and `t.names` is used only to emit `graph-dict`.
+- `dune_args` returns no dict at all for an empty arg list, reachable now
+  that a malformed (non-integer) `rule_id`/`dep_id` can leave an instant with
+  nothing else to say.
+- Tests (`perfetto.t`): exact arg sets per event name (via the phase 6
+  `event_args` helper) for all four kinds; `async_id`/`dep`/`outcome_kind`
+  /`str: "executed"` absent; the outcome asserted on the blob's `graph-rules`
+  record instead; and a `first_int_arg` helper checking that the `dep_id` on
+  dep.txt's `build-dep-start` is the dict id its `graph-deps` record is keyed
+  on.
+
+Implementation notes:
+
+- `name: "outcome"` still appears in the dump — it is the `build` category's
+  `build-finish` event (success/failure of the whole build), unrelated to a
+  rule's outcome. `perfetto.t` asserts this explicitly so the grep is not
+  mistaken for a leftover graph annotation.
+- `_build/default/out.txt` likewise survives as an interned string, as the
+  user-requested target on the `targets` event (real paths, never intern
+  ids). The phase 2 prose had attributed that string to a build-dep instant,
+  which was wrong even then; the test says so now.
+- gen-rules/dynamic-includes keep their path args: they have no blob record
+  to look anything up in. A `gen-rules-finish` for a directory that is not
+  standalone/group-root carries only `dur_ns`.
+- Stock-UI cost: clicking an instant now shows an id rather than a path, so
+  the raw timeline is less readable without the plugin. That is the trade the
+  blob was introduced to make; the flows and `dur_ns` (see the debug-track
+  recipe) are what the stock UI still answers on its own.
+
 ## Verification checklist (carry across sessions)
 
 - [x] `debug.dune.*` is the actual args-table key prefix (phase 1, checked
@@ -558,3 +636,6 @@ Implementation notes / deviations from the schema as originally drafted:
 - [ ] Four-hop flow chain draws as expected in the UI, and a
       parallelism-heavy trace (wide ready set) no longer multiplies
       `exec-rule-action` tracks (phase 6).
+- [ ] The plugin is updated to the phase 7 arg set (`rule_id`/`dep_id` as the
+      only join keys, outcomes read from the blob) before this ships as the
+      v1 contract.
