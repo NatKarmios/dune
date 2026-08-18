@@ -381,9 +381,9 @@ module Dir = struct
       in
       let impl =
         lazy
-          (match Dune_trace.global () with
-           | None -> map_reduce
-           | Some trace ->
+          (match Dune_trace.global (), Dune_trace.enabled Dune_trace.Category.Rules with
+           | None, _ | _, false -> map_reduce
+           | Some trace, true ->
              fun t ~traverse ~trace_event_name ~f ->
                let start = Time.now () in
                let+ res = map_reduce t ~traverse ~trace_event_name ~f in
