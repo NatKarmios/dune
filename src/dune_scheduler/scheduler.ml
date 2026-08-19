@@ -28,6 +28,19 @@ exception Build_cancelled
 
 let cancelled () = raise (Memo.Non_reproducible Build_cancelled)
 
+(* [Build_cancelled] is raised wrapped in [Memo.Non_reproducible] (see
+   [cancelled] above), and a memo node it passes through wraps it again in
+   [Memo.Error.E], so a handler may see it under either or both. *)
+let caused_by_cancellation (exn : Exn_with_backtrace.t) =
+  let rec loop = function
+    | Build_cancelled -> true
+    | Memo.Non_reproducible exn -> loop exn
+    | Memo.Error.E err -> loop (Memo.Error.get err)
+    | _ -> false
+  in
+  loop exn.exn
+;;
+
 let check_cancelled = function
   | Some cancel when Fiber.Cancel.fired cancel -> cancelled ()
   | None | Some _ -> ()
@@ -536,6 +549,8 @@ let flush_file_watcher () =
 
 module Run = struct
   exception Build_cancelled = Build_cancelled
+
+  let caused_by_cancellation = caused_by_cancellation
 
   module Shutdown = Shutdown
 

@@ -1125,18 +1125,8 @@ let files_of ~dir =
     Filename_set.create ~dir filenames
 ;;
 
-let caused_by_cancellation (exn : Exn_with_backtrace.t) =
-  match exn.exn with
-  | Scheduler.Run.Build_cancelled -> true
-  | Memo.Error.E err ->
-    (match Memo.Error.get err with
-     | Scheduler.Run.Build_cancelled -> true
-     | _ -> false)
-  | _ -> false
-;;
-
 let report_early_exn exn =
-  match caused_by_cancellation exn with
+  match Scheduler.Run.caused_by_cancellation exn with
   | true -> Fiber.return ()
   | false ->
     let open Fiber.O in
@@ -1157,9 +1147,12 @@ let handle_final_exns exns =
   | Early -> ()
   | Deterministic ->
     List.iter exns ~f:(fun exn ->
-      if not (caused_by_cancellation exn) then Dune_util.Report_error.report exn)
+      if not (Scheduler.Run.caused_by_cancellation exn)
+      then Dune_util.Report_error.report exn)
   | Twice ->
-    (match List.filter exns ~f:(fun exn -> not (caused_by_cancellation exn)) with
+    (match
+       List.filter exns ~f:(fun exn -> not (Scheduler.Run.caused_by_cancellation exn))
+     with
      | [] -> ()
      | exns ->
        Console.print [ Pp.verbatim "==== Error Summary ====" ];
@@ -1215,7 +1208,7 @@ let run_with_error_collection ?restart_started_at ~build_started_at ~build colle
         handle_final_exns exns;
         finalize_diff_promotion ();
         let final_status =
-          if List.exists exns ~f:caused_by_cancellation
+          if List.exists exns ~f:Scheduler.Run.caused_by_cancellation
           then State.Restarting_current_build
           else Build_failed__now_waiting_for_changes
         in
@@ -1327,7 +1320,7 @@ let run_build_requests ?restart_started_at ~build_started_at ?build (request : R
     | Ok () ->
       let+ () = finish_request goal Success in
       Ok ()
-    | Error exns when List.for_all exns ~f:caused_by_cancellation ->
+    | Error exns when List.for_all exns ~f:Scheduler.Run.caused_by_cancellation ->
       Fiber.return (Error exns)
     | Error exns ->
       let+ () = finish_request goal Failure in
