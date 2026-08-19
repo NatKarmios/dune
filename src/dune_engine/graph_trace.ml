@@ -144,6 +144,23 @@ module Exec_rule = struct
     | Shared_cache_hit -> Shared_cache_hit
   ;;
 
+  (* Recover the dependencies of a rule that failed before resolving them.
+     [Lazy] evaluation reports the same set as the [Eager] evaluation that
+     failed -- for every [Action_builder.t] constructor, the keys of the [Eager]
+     facts are exactly the [Lazy] dep set -- but reaches it without building
+     anything, so it does not re-enter the failure, which lives behind the [f]
+     that [Eager] passes to [Dep.Facts.record_facts]. Errors raised here are
+     dropped: recovering the deps must not displace the failure being
+     reported. *)
+  let recover_deps (rule : Rule.t) =
+    Fiber.map
+      (Fiber.collect_errors (fun () ->
+         Memo.run (Action_builder.evaluate_and_collect_deps rule.action)))
+      ~f:(function
+        | Ok (_, deps) -> deps
+        | Error (_ : Exn_with_backtrace.t list) -> Dep.Set.empty)
+  ;;
+
   module Emit = struct
     let start
           ~rule:{ Rule.id; targets = { Import.Targets.Validated.root; files; dirs }; _ }
@@ -173,18 +190,27 @@ module Exec_rule = struct
     ;;
   end
 
-  (* [f] is handed a [finish] callback, called once the rule's execution has
-     resolved its [deps] and [dyn_deps] and produced an [outcome], to emit the
+  (* [f] reports the rule's deps to [deps_resolved] as soon as it has them, and
+     calls [finish] once the execution has produced an [outcome], to emit the
      matching "exec-rule" end. It is also handed a [trace_action] wrapper that
      emits an "exec-rule-action" begin/end pair around the action's execution
      fiber; the pair shares the rule's [async_id], so it nests inside the
      rule's span. [Build_system] applies it to the action execution proper
      (Step IV, after both cache lookups), so the span exists only for executed
-     rules. *)
+     rules.
+
+     If [f] raises, the end is emitted here instead, so that a rule which never
+     completes still lands in the trace with its deps rather than leaving a span
+     that never ends. Which failure it was follows from how far [f] got:
+     [Dep_fail] before it resolved the deps and [Action_fail] after. A
+     cancellation is not the rule's own failure -- the build is being torn down
+     around it -- so it is reported as [Cancelled], with no deps and no work
+     spent recovering them. *)
   let start
         ~(rule : Rule.t)
         (f :
-          finish:(deps:Dep.Set.t -> dyn_deps:Dep.Set.t list -> outcome -> unit)
+          deps_resolved:(Dep.Facts.t -> unit)
+          -> finish:(dyn_deps:Dep.Set.t list -> outcome -> unit)
           -> trace_action:((unit -> 'b Fiber.t) -> 'b Fiber.t)
           -> 'a Memo.t)
     : 'a Memo.t
@@ -198,8 +224,25 @@ module Exec_rule = struct
       (let* forced_by = Forced_by.get in
        let start = Time.now () in
        Emit.start ~rule ~async_id ~forced_by ~start;
-       let finish ~deps ~dyn_deps outcome =
-         Emit.finish ~async_id ~rule_id ~deps ~dyn_deps (conv_outcome outcome)
+       (* A span has at most one end. [emit_finish] is reached both by [f]
+          completing and by the error handler below, which runs once per error
+          raised under the rule, so only the first call emits. *)
+       let finished = ref false in
+       let emit_finish ~deps ~dyn_deps outcome =
+         if not !finished
+         then (
+           finished := true;
+           Emit.finish ~async_id ~rule_id ~deps ~dyn_deps outcome)
+       in
+       (* The rule's deps, once [f] has resolved them. [None] until then, which
+          is how a failure before that point is told from one after. *)
+       let resolved = ref None in
+       let deps_resolved facts = resolved := Some (Dep.Set.of_keys facts) in
+       let finish ~dyn_deps outcome =
+         emit_finish
+           ~deps:(Option.value !resolved ~default:Dep.Set.empty)
+           ~dyn_deps
+           (conv_outcome outcome)
        in
        let trace_action action =
          let start = Time.now () in
@@ -210,10 +253,32 @@ module Exec_rule = struct
            Graph.Exec_rule_action.finish ~async_id);
          result
        in
-       Forced_by.set ~new_forcer (fun () -> f ~finish ~trace_action) ())
+       Fiber.with_error_handler
+         (fun () ->
+            Forced_by.set
+              ~new_forcer
+              (fun () -> f ~deps_resolved ~finish ~trace_action)
+              ())
+         ~on_error:(fun exn ->
+           let* () =
+             match Import.Scheduler.Run.caused_by_cancellation exn, !resolved with
+             | true, _ ->
+               emit_finish ~deps:Dep.Set.empty ~dyn_deps:[] Cancelled;
+               Fiber.return ()
+             | false, Some deps ->
+               emit_finish ~deps ~dyn_deps:[] Action_fail;
+               Fiber.return ()
+             | false, None ->
+               let+ deps = recover_deps rule in
+               emit_finish ~deps ~dyn_deps:[] Dep_fail
+           in
+           Exn_with_backtrace.reraise exn))
       |> Memo.of_reproducible_fiber)
     else
-      f ~finish:(fun ~deps:_ ~dyn_deps:_ _ -> ()) ~trace_action:(fun action -> action ())
+      f
+        ~deps_resolved:ignore
+        ~finish:(fun ~dyn_deps:_ _ -> ())
+        ~trace_action:(fun action -> action ())
   ;;
 end
 

@@ -3,22 +3,32 @@
 open Import
 
 module Exec_rule : sig
-  (** How a rule's execution completed. *)
+  (** How a rule's execution completed. A rule that never completed is reported
+      by [start] itself, so those outcomes are not here. *)
   type outcome =
     | Executed
     | Local_cache_hit
     | Shared_cache_hit
 
-  (** Trace the execution of [rule] as an "exec-rule" async span. [f] is handed
-      a [finish] callback to emit the span's end, passing the resolved [deps],
-      the dynamic dependencies [dyn_deps] (one dep set per dynamic-deps stage),
-      and the execution [outcome]. [f] is also handed a [trace_action] wrapper
-      to run the rule's action execution proper under a nested
-      "exec-rule-action" span (sharing the rule's async id); cache hits execute
-      no action and so never call it. *)
+  (** Trace the execution of [rule] as an "exec-rule" async span. [f] must pass
+      the rule's facts to [deps_resolved] as soon as it has them: they supply
+      the deps carried by the span's end. [f] then calls [finish] with the
+      dynamic dependencies [dyn_deps] (one dep set per dynamic-deps stage) and
+      the execution [outcome] to emit that end. [f] is also handed a
+      [trace_action] wrapper to run the rule's action execution proper under a
+      nested "exec-rule-action" span (sharing the rule's async id); cache hits
+      execute no action and so never call it.
+
+      If [f] raises, the end is emitted here instead, recording the rule as
+      failed rather than leaving a span that never ends: with the deps reported
+      to [deps_resolved] if it got that far, and otherwise with the deps
+      recovered from [rule] without building them. A cancellation is reported as
+      such and carries no deps. A span has at most one end however it is
+      reached. *)
   val start
     :  rule:Rule.t
-    -> (finish:(deps:Dep.Set.t -> dyn_deps:Dep.Set.t list -> outcome -> unit)
+    -> (deps_resolved:(Dep.Facts.t -> unit)
+        -> finish:(dyn_deps:Dep.Set.t list -> outcome -> unit)
         -> trace_action:((unit -> 'b Fiber.t) -> 'b Fiber.t)
         -> 'a Memo.t)
     -> 'a Memo.t

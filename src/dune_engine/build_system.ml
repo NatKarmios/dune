@@ -531,7 +531,7 @@ module Internal = struct
 
   and execute_rule_impl ~rule_kind rule =
     Graph_trace.Exec_rule.start ~rule
-    @@ fun ~finish ~trace_action ->
+    @@ fun ~deps_resolved ~finish ~trace_action ->
     let { Rule.id = _; targets; mode; action; info = _; loc } = rule in
     let head_target = Targets.Validated.head targets in
     let* execution_parameters =
@@ -550,6 +550,7 @@ module Internal = struct
        memoized, and the result is not expected to change often, so we do not
        sacrifice too much performance here by executing it sequentially. *)
     let* action, facts = Action_builder.evaluate_and_collect_facts action in
+    deps_resolved facts;
     let wrap_fiber f =
       Memo.of_reproducible_fiber
         (if Loc.is_none loc
@@ -727,7 +728,7 @@ module Internal = struct
           ~targets:produced_targets
           ~promote_source:config.promote_source
       in
-      finish ~deps:(Dep.Set.of_keys facts) ~dyn_deps outcome;
+      finish ~dyn_deps outcome;
       produced_targets)
     (* jeremidimino: We need to include the dependencies discovered while
        running the action here. Otherwise, package dependencies are broken in
