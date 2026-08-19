@@ -1165,6 +1165,21 @@ module Graph = struct
       | Dep_rule of int
       | Dep_expanded of string list
       | Dep_is_source
+      | Dep_unknown
+
+    (* How building the dep itself ended. Orthogonal to [outcome]: a dep whose
+       resolution is known before the building starts reports it either way, so
+       without this a failed dep would be indistinguishable from a built one. *)
+    type status =
+      | Succeeded
+      | Failed
+      | Cancelled
+
+    let status_to_string = function
+      | Succeeded -> "succeeded"
+      | Failed -> "failed"
+      | Cancelled -> "cancelled"
+    ;;
 
     (* Async span for building a single dep, keyed by [async_id]: [start] emits
        the begin (carrying the interned [dep]) and [finish] the matching end
@@ -1182,12 +1197,12 @@ module Graph = struct
       @ [ Event.async_begin ~args ~async_id ~name:"build-dep" ts Graph ]
     ;;
 
-    let finish ~async_id ~(outcome : outcome) =
+    let finish ~async_id ~(outcome : outcome) ~(status : status) =
       let ts = Time.now () in
       let expanded =
         match outcome with
         | Dep_expanded deps -> deps
-        | Dep_rule _ | Dep_is_source -> []
+        | Dep_rule _ | Dep_is_source | Dep_unknown -> []
       in
       let intern_events, expanded_ids = intern_strings ~ts expanded in
       let outcome_arg =
@@ -1196,8 +1211,16 @@ module Graph = struct
         | Dep_expanded _ ->
           Arg.list (Arg.string "expanded" :: List.map expanded_ids ~f:Arg.int)
         | Dep_is_source -> Arg.list [ Arg.string "is-source" ]
+        | Dep_unknown -> Arg.list [ Arg.string "unknown" ]
       in
-      let args = [ "dep_outcome", outcome_arg ] in
+      (* Omitted for the common case, so that the numerous successful build-dep
+         spans do not each carry it. *)
+      let status_arg =
+        match status with
+        | Succeeded -> []
+        | Failed | Cancelled -> [ "dep_status", Arg.string (status_to_string status) ]
+      in
+      let args = [ "dep_outcome", outcome_arg ] @ status_arg in
       intern_events @ [ Event.async_end ~args ~async_id ~name:"build-dep" ts Graph ]
     ;;
   end
@@ -1250,7 +1273,7 @@ module Graph = struct
        all interned; it returns the end event preceded by an [intern] event for
        any deps seen for the first time, so emit the whole list (e.g. with
        [emit_all]). *)
-    let finish ~async_id ~rule_id ~deps ~dyn_deps ~outcome =
+    let finish ~async_id ~rule_id ~deps ~deps_unknown ~dyn_deps ~outcome =
       let ts = Time.now () in
       let dep_intern_events, dep_ids = intern_strings ~ts deps in
       let per_stage = List.map dyn_deps ~f:(intern_strings ~ts) in
@@ -1266,11 +1289,20 @@ module Graph = struct
             )
           ]
       in
+      (* [deps] is empty both for a rule with no dependencies and for one whose
+         dependencies could not be determined, and [ids_arg] omits an empty
+         list, so the two are otherwise indistinguishable on the wire. *)
+      let deps_unknown_arg =
+        match deps_unknown with
+        | false -> []
+        | true -> [ "deps_unknown", Arg.bool true ]
+      in
       let args =
         [ "rule_id", Arg.int rule_id
         ; "rule_outcome", Arg.string (outcome_to_string outcome)
         ]
         @ ids_arg "deps" dep_ids
+        @ deps_unknown_arg
         @ dyn_deps_arg
       in
       dep_intern_events

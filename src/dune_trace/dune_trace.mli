@@ -304,11 +304,22 @@ module Event : sig
     module Build_dep : sig
       (** How building a dep resolved: it belonged to a [Dep_rule] (by id), it
           [Dep_expanded] to concrete deps (e.g. an alias or glob), or it was a
-          source file ([Dep_is_source]). *)
+          source file ([Dep_is_source]). [Dep_unknown] records a dep whose
+          resolution dune could not determine, because building it failed or was
+          cancelled first. *)
       type outcome =
         | Dep_rule of int
         | Dep_expanded of string list
         | Dep_is_source
+        | Dep_unknown
+
+      (** How building the dep itself ended. Orthogonal to [outcome]: a dep whose
+          resolution is known before the building starts reports it either way,
+          so without this a failed dep would look like a built one. *)
+      type status =
+        | Succeeded
+        | Failed
+        | Cancelled
 
       (** An async "build-dep" span for building a single dep, keyed by
           [async_id]: [start] emits the begin (carrying [dep]) and [finish] the
@@ -317,7 +328,7 @@ module Event : sig
           first time; emit the whole list (e.g. with [emit_all]). *)
       val start : async_id:async_id -> forced_by:forced_by option -> dep:string -> t list
 
-      val finish : async_id:async_id -> outcome:outcome -> t list
+      val finish : async_id:async_id -> outcome:outcome -> status:status -> t list
     end
 
     module Exec_rule : sig
@@ -354,10 +365,14 @@ module Event : sig
         -> start:Time.t
         -> t list
 
+      (** [deps_unknown] marks a rule whose dependencies could not be
+          determined, telling that apart from a rule that genuinely has none:
+          [deps] is empty either way. *)
       val finish
         :  async_id:async_id
         -> rule_id:int
         -> deps:string list
+        -> deps_unknown:bool
         -> dyn_deps:string list list
         -> outcome:outcome
         -> t list

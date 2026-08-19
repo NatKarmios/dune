@@ -353,10 +353,13 @@ module Graph_blob = struct
     | _ -> "u"
   ;;
 
-  (* [Build_dep.outcome] rendered as "r<rule_id>" | "s" | "x<id,id,...>". *)
+  (* [Build_dep.outcome] rendered as "r<rule_id>" | "s" | "x<id,id,...>" | "u".
+     "u" is a resolution dune reported it could not determine, as distinct from
+     the "?" of a span that never ended. *)
   let dep_resolution = function
     | Sexp.List (Atom "rule" :: Atom id :: _) -> "r" ^ id
     | Sexp.List (Atom "is-source" :: _) -> "s"
+    | Sexp.List (Atom "unknown" :: _) -> "u"
     | Sexp.List (Atom "expanded" :: ids) ->
       "x"
       ^ String.concat
@@ -376,6 +379,14 @@ module Graph_blob = struct
     | "action-fail" -> "A"
     | "cancelled" -> "C"
     | _ -> "?"
+  ;;
+
+  (* [Build_dep.status] rendered as "" (succeeded, the common case, which the
+     event omits) | "f" | "c". *)
+  let dep_status_code = function
+    | Some (Sexp.Atom "failed") -> "f"
+    | Some (Sexp.Atom "cancelled") -> "c"
+    | _ -> ""
   ;;
 
   let ids_field ids = String.concat ~sep:"," ids
@@ -906,7 +917,11 @@ module Perfetto_conv = struct
              ; Graph_blob.ids_field b.target_dirs
              ; Graph_blob.rule_outcome_code rule_outcome
              ; Graph_blob.forced_by_code b.forced_by
-             ; Graph_blob.ids_field (ids "deps")
+               (* [deps] is empty both for a rule with no deps and for one
+                  whose deps could not be determined; "?" tells them apart. *)
+             ; (match field "deps_unknown" rest with
+                | Some (Sexp.Atom "true") -> "?"
+                | _ -> Graph_blob.ids_field (ids "deps"))
              ; Graph_blob.dyn_deps_field dyn_deps
              ]
          in
@@ -936,6 +951,7 @@ module Perfetto_conv = struct
              [ b.dep
              ; Graph_blob.dep_resolution dep_outcome
              ; Graph_blob.forced_by_code b.forced_by
+             ; Graph_blob.dep_status_code (field "dep_status" rest)
              ]
          in
          t.rev_dep_lines <- line :: t.rev_dep_lines;
@@ -995,7 +1011,7 @@ module Perfetto_conv = struct
     Table.to_list t.open_deps
     |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
     |> List.map ~f:(fun (_, b) ->
-      String.concat ~sep:"\t" [ b.dep; "?"; Graph_blob.forced_by_code b.forced_by ])
+      String.concat ~sep:"\t" [ b.dep; "?"; Graph_blob.forced_by_code b.forced_by; "" ])
   ;;
 
   (* Unmatched begins, also flushed as bare "-start" instants on their kind's

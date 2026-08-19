@@ -211,29 +211,42 @@ leading id is also the arg its span's instants carry (`rule_id` /
   `<outcome>`: `X` executed, `L` local cache hit, `S` shared cache hit, `D`
   failed before its deps were resolved, `A` failed after its deps were
   resolved (i.e. in its action), `C` cancelled because the build was torn
-  down around it, `?` unfinished (see below). A `D` line carries the deps
-  dune recovered for the rule; `A` carries the deps it had resolved; `C`
-  carries none.
+  down around it, `?` unfinished (see below). A `D` line carries the deps dune
+  recovered for the rule (or `?`, below, if it could not); `A` carries the deps
+  it had resolved; a `C` line carries them if the rule got as far as resolving
+  them, and `?` otherwise -- a cancelled rule is never made to recover them,
+  since the build is going away.
   `<forced_by>`: `r<rule_id>` | `v<rule_id>` (recovering that rule's deps
   after it failed, see `<outcome>` `D`) | `d<dep_id>` | `i<path_id>`
   (dynamic-includes) | `g<path_id>` (gen-rules) | `p<path_id>` (pform) |
   `c` (configurator) | `q` (request) | `u` (unknown).
   `<dyn_dep_stages>`: stages separated by `|`, ids within a stage by `,`;
   empty when none.
+  `<dep_ids>` is `?` when dune could not determine the rule's deps, which is
+  otherwise indistinguishable from a rule that has none (both empty).
 
 - `graph-deps` — one line per build-dep span, ordered by span end:
 
-      <dep_id>\t<resolution>\t<forced_by>
+      <dep_id>\t<resolution>\t<forced_by>\t<status>
 
   `<resolution>`: `r<rule_id>` | `s` (source) | `x<id,id,...>`
-  (expanded, e.g. alias/glob) | `?` unfinished (see below).
+  (expanded, e.g. alias/glob) | `u` (dune could not determine it: building the
+  dep failed or was cancelled first) | `?` unfinished (see below). `u` and `?`
+  are distinct: `u` means dune reported that it did not know, `?` that the span
+  never ended at all.
+  `<status>`: how building the dep itself ended -- empty (succeeded), `f`
+  (failed), `c` (cancelled). This is orthogonal to `<resolution>`: a file dep
+  resolves to its producing rule, and a glob to the files it matched, before
+  the building that can fail, so both report a resolution whether or not that
+  building went on to succeed.
 
   **Unfinished spans** (a crash or interrupt leaves a begin with no matching
   end — see `test/blackbox-tests/test-cases/trace/interrupted-watch-build-events.t`
   for a trace that can produce these): the converter flushes each open span
   at EOF as a `graph-rules`/`graph-deps` line with `?` in place of `<outcome>`
-  /`<resolution>` and empty `<dep_ids>`/`<dyn_dep_stages>`, appended after the
-  completed lines and sorted by `async_id` for determinism.
+  /`<resolution>` and empty `<dep_ids>`/`<dyn_dep_stages>`/`<status>`, appended
+  after the completed lines and sorted by `async_id` for determinism. Every line
+  of a given kind has the same field count however it was produced.
 
 ### Debug-track recipe (interval materialization)
 

@@ -76,9 +76,9 @@ module Build_dep = struct
         ~dep:(dep_to_string dep)
     ;;
 
-    let finish ~async_id outcome =
+    let finish ~async_id outcome status =
       Dune_trace.emit_all ~buffered:true Category.Graph
-      @@ fun () -> Graph.Build_dep.finish ~async_id ~outcome
+      @@ fun () -> Graph.Build_dep.finish ~async_id ~outcome ~status
     ;;
   end
 
@@ -94,7 +94,7 @@ module Build_dep = struct
       let open Fiber.O in
       (let* forced_by = Forced_by.get in
        Emit.start ~async_id ~forced_by ~dep;
-       let finish x = Emit.finish ~async_id (outcome_of x) in
+       let finish x = Emit.finish ~async_id (outcome_of x) Graph.Build_dep.Succeeded in
        Forced_by.set ~new_forcer f finish)
       |> Memo.of_reproducible_fiber)
     else f ignore
@@ -198,7 +198,13 @@ module Exec_rule = struct
       @@ fun () ->
       let deps = Dep.Set.to_list_map ~f:dep_to_string deps in
       let dyn_deps = List.map dyn_deps ~f:(Dep.Set.to_list_map ~f:dep_to_string) in
-      Graph.Exec_rule.finish ~async_id ~rule_id ~deps ~dyn_deps ~outcome
+      Graph.Exec_rule.finish
+        ~async_id
+        ~rule_id
+        ~deps
+        ~deps_unknown:false
+        ~dyn_deps
+        ~outcome
     ;;
   end
 
