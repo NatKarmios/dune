@@ -1119,6 +1119,7 @@ module Graph = struct
 
   type forced_by =
     | Forced_by_rule of int
+    | Forced_by_dep_recovery of int
     | Forced_by_dep of string
     | Forced_by_dynamic_includes of Path.Source.t
     | Forced_by_gen_rules of Path.Build.t
@@ -1129,13 +1130,15 @@ module Graph = struct
   (* The dep/path payloads of [forced_by] are interned like any other trace
      path, so this returns the intern events (for values seen for the first
      time) alongside the [forced_by] arg, whose payloads are the resulting ids.
-     [Forced_by_rule]'s payload is a rule id, not a path, so it is left inline. *)
+     [Forced_by_rule]'s and [Forced_by_dep_recovery]'s payloads are rule ids,
+     not paths, so they are left inline. *)
   let forced_by_args ~ts = function
     | None -> [], [ "forced_by", Arg.list [] ]
     | Some forced_by ->
       let tag, strings =
         match forced_by with
         | Forced_by_rule id -> `Rule id, []
+        | Forced_by_dep_recovery id -> `Dep_recovery id, []
         | Forced_by_dep dep -> `Paths "dep", [ dep ]
         | Forced_by_dynamic_includes path ->
           `Paths "dynamic-includes", [ Path.Source.to_string path ]
@@ -1148,6 +1151,7 @@ module Graph = struct
       let parts =
         match tag with
         | `Rule id -> [ Arg.string "rule"; Arg.int id ]
+        | `Dep_recovery id -> [ Arg.string "dep-recovery"; Arg.int id ]
         | `Paths name -> Arg.string name :: List.map ids ~f:Arg.int
       in
       intern_events, [ "forced_by", Arg.list parts ]

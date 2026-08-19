@@ -214,7 +214,8 @@ leading id is also the arg its span's instants carry (`rule_id` /
   down around it, `?` unfinished (see below). A `D` line carries the deps
   dune recovered for the rule; `A` carries the deps it had resolved; `C`
   carries none.
-  `<forced_by>`: `r<rule_id>` | `d<dep_id>` | `i<path_id>`
+  `<forced_by>`: `r<rule_id>` | `v<rule_id>` (recovering that rule's deps
+  after it failed, see `<outcome>` `D`) | `d<dep_id>` | `i<path_id>`
   (dynamic-includes) | `g<path_id>` (gen-rules) | `p<path_id>` (pform) |
   `c` (configurator) | `q` (request) | `u` (unknown).
   `<dyn_dep_stages>`: stages separated by `|`, ids within a stage by `,`;

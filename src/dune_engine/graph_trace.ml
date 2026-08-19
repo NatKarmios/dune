@@ -28,6 +28,7 @@ let dep_to_string (dep : Dep.t) =
 module Forced_by = struct
   type t' =
     | Forced_by_rule of Rule.Id.t
+    | Forced_by_dep_recovery of Rule.Id.t
     | Forced_by_dep of Dep.t
     | Forced_by_dynamic_includes of Path.Source.t
     | Forced_by_gen_rules of Path.Build.t
@@ -39,6 +40,7 @@ module Forced_by = struct
 
   let conv : t -> Graph.forced_by = function
     | Forced_by_rule id -> Forced_by_rule (Rule.Id.to_int id)
+    | Forced_by_dep_recovery id -> Forced_by_dep_recovery (Rule.Id.to_int id)
     | Forced_by_dep dep -> Forced_by_dep (dep_to_string dep)
     | Forced_by_dynamic_includes path -> Forced_by_dynamic_includes path
     | Forced_by_gen_rules dir -> Forced_by_gen_rules dir
@@ -54,6 +56,7 @@ module Forced_by = struct
   let set ~new_forcer f x = Fiber.Var.set var (Some new_forcer) (fun () -> Memo.run (f x))
   let get = Fiber.Var.get var
   let rule ~rule:{ Rule.id; _ } = Forced_by_rule id
+  let dep_recovery ~rule:{ Rule.id; _ } = Forced_by_dep_recovery id
   let dep ~dep = Forced_by_dep dep
   let dynamic_includes ~dune_file = Forced_by_dynamic_includes dune_file
   let gen_rules ~dir = Forced_by_gen_rules dir
@@ -151,11 +154,20 @@ module Exec_rule = struct
      anything, so it does not re-enter the failure, which lives behind the [f]
      that [Eager] passes to [Dep.Facts.record_facts]. Errors raised here are
      dropped: recovering the deps must not displace the failure being
-     reported. *)
+     reported.
+
+     [Lazy] evaluation does not build deps, but it does run the rule's
+     [Of_memo] nodes, which can force a build of their own (a [%{read:...}]
+     pform, say). Those run under a [dep_recovery] forcer so that they are
+     attributed to recovering this rule rather than to whatever forced the
+     rule, which is no longer what is running. *)
   let recover_deps (rule : Rule.t) =
     Fiber.map
       (Fiber.collect_errors (fun () ->
-         Memo.run (Action_builder.evaluate_and_collect_deps rule.action)))
+         Forced_by.set
+           ~new_forcer:(Forced_by.dep_recovery ~rule)
+           (fun () -> Action_builder.evaluate_and_collect_deps rule.action)
+           ()))
       ~f:(function
         | Ok (_, deps) -> deps
         | Error (_ : Exn_with_backtrace.t list) -> Dep.Set.empty)

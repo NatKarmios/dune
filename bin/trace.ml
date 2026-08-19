@@ -337,12 +337,13 @@ module Graph_blob = struct
   ;;
 
   (* [forced_by] rendered as one of the short codes in the schema: "u"
-     (unknown), "r<id>", "d<id>", "i<id>", "g<id>", "p<id>", "c", "q". An
-     unrecognised shape degrades to "u" rather than failing the whole
+     (unknown), "r<id>", "v<id>", "d<id>", "i<id>", "g<id>", "p<id>", "c",
+     "q". An unrecognised shape degrades to "u" rather than failing the whole
      conversion. *)
   let forced_by_code = function
     | Sexp.List [] -> "u"
     | Sexp.List (Atom "rule" :: Atom id :: _) -> "r" ^ id
+    | Sexp.List (Atom "dep-recovery" :: Atom id :: _) -> "v" ^ id
     | Sexp.List (Atom "dep" :: Atom id :: _) -> "d" ^ id
     | Sexp.List (Atom "dynamic-includes" :: Atom id :: _) -> "i" ^ id
     | Sexp.List (Atom "gen-rules" :: Atom id :: _) -> "g" ^ id

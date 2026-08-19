@@ -293,6 +293,7 @@ module Event : sig
        the [string]s and [string list]s below are values to be interned. *)
     type forced_by =
       | Forced_by_rule of int
+      | Forced_by_dep_recovery of int
       | Forced_by_dep of string
       | Forced_by_dynamic_includes of Path.Source.t
       | Forced_by_gen_rules of Path.Build.t
