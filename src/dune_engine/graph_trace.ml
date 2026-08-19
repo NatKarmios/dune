@@ -133,10 +133,16 @@ module Build_dep = struct
 end
 
 module Exec_rule = struct
-  type outcome = Graph.Exec_rule.outcome =
+  type outcome =
     | Executed
     | Local_cache_hit
     | Shared_cache_hit
+
+  let conv_outcome : outcome -> Graph.Exec_rule.outcome = function
+    | Executed -> Executed
+    | Local_cache_hit -> Local_cache_hit
+    | Shared_cache_hit -> Shared_cache_hit
+  ;;
 
   module Emit = struct
     let start
@@ -193,7 +199,7 @@ module Exec_rule = struct
        let start = Time.now () in
        Emit.start ~rule ~async_id ~forced_by ~start;
        let finish ~deps ~dyn_deps outcome =
-         Emit.finish ~async_id ~rule_id ~deps ~dyn_deps outcome
+         Emit.finish ~async_id ~rule_id ~deps ~dyn_deps (conv_outcome outcome)
        in
        let trace_action action =
          let start = Time.now () in

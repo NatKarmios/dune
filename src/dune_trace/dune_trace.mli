@@ -320,10 +320,18 @@ module Event : sig
     end
 
     module Exec_rule : sig
+      (* How a rule's execution ended. The first three are successful outcomes;
+         the rest record a rule that never completed. [Dep_fail] is a failure
+         raised before the rule's dependencies were resolved and [Action_fail]
+         one raised after, while [Cancelled] means the build was torn down
+         around the rule (so it is not the rule's own failure). *)
       type outcome =
         | Executed
         | Local_cache_hit
         | Shared_cache_hit
+        | Dep_fail
+        | Action_fail
+        | Cancelled
 
       (* The events are Chrome nestable-async events keyed by [async_id]:
          [start] emits a begin and [finish] the matching end. Both also carry

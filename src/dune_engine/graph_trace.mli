@@ -3,7 +3,8 @@
 open Import
 
 module Exec_rule : sig
-  type outcome = Dune_trace.Event.Graph.Exec_rule.outcome =
+  (** How a rule's execution completed. *)
+  type outcome =
     | Executed
     | Local_cache_hit
     | Shared_cache_hit

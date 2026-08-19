@@ -137,7 +137,9 @@ On track `exec-rule`:
 - `exec-rule-finish`: `rule_id`, `dur_ns`.
 - `exec-rule-resolved`: collapsed form used when the outcome is a cache hit;
   placed at the begin timestamp; `rule_id`, `dur_ns`. Which outcome it was
-  (`X`/`L`/`S`) is in `graph-rules`.
+  is in `graph-rules`. Only cache hits collapse: a rule that failed or was
+  cancelled keeps the `exec-rule-start`/`-finish` pair, since it occupied
+  that span of time.
 
 On track `build-dep`:
 
@@ -206,8 +208,12 @@ leading id is also the arg its span's instants carry (`rule_id` /
 
       <rule_id>\t<dir_id>\t<target_file_ids>\t<target_dir_ids>\t<outcome>\t<forced_by>\t<dep_ids>\t<dyn_dep_stages>
 
-  `<outcome>`: `X` executed, `L` local cache hit, `S` shared cache hit, `?`
-  unfinished (see below).
+  `<outcome>`: `X` executed, `L` local cache hit, `S` shared cache hit, `D`
+  failed before its deps were resolved, `A` failed after its deps were
+  resolved (i.e. in its action), `C` cancelled because the build was torn
+  down around it, `?` unfinished (see below). A `D` line carries the deps
+  dune recovered for the rule; `A` carries the deps it had resolved; `C`
+  carries none.
   `<forced_by>`: `r<rule_id>` | `d<dep_id>` | `i<path_id>`
   (dynamic-includes) | `g<path_id>` (gen-rules) | `p<path_id>` (pform) |
   `c` (configurator) | `q` (request) | `u` (unknown).

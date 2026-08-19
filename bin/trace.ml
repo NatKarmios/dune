@@ -366,11 +366,14 @@ module Graph_blob = struct
     | _ -> "?"
   ;;
 
-  (* [Exec_rule.outcome_to_string]'s value rendered as "X" | "L" | "S". *)
+  (* [Exec_rule.outcome_to_string]'s value rendered as a single letter. *)
   let rule_outcome_code = function
     | "executed" -> "X"
     | "local-cache-hit" -> "L"
     | "shared-cache-hit" -> "S"
+    | "dep-fail" -> "D"
+    | "action-fail" -> "A"
+    | "cancelled" -> "C"
     | _ -> "?"
   ;;
 
@@ -615,7 +618,9 @@ module Perfetto_conv = struct
      an exec-rule span, per the "Lifecycle instants" schema
      (doc/dev/trace-graph-perfetto.md). [rule_outcome] is the raw
      [Graph.Exec_rule.outcome_to_string] value; only the blob records it (as a
-     letter code), the instants merely collapse on it. *)
+     letter code), the instants merely collapse on it. A failed or cancelled
+     rule keeps the start/finish pair: it occupied that span of time, unlike a
+     cache hit, and which outcome it was is in the blob. *)
   let emit_exec_rule_end t ~ts (b : rule_begin) ~rule_outcome =
     let dur_ns = ts - b.begin_ts in
     match rule_outcome with
@@ -628,7 +633,7 @@ module Perfetto_conv = struct
         ~ts:b.begin_ts
         ~flow_ids:[]
         ~args:(dune_args (rule_id_arg b.rule_id @ [ dur_ns_arg dur_ns ]))
-    | _ (* "executed" *) ->
+    | _ (* "executed", or a failure/cancellation *) ->
       push_instant
         t
         ~uuid:exec_rule_uuid

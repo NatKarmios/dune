@@ -1199,15 +1199,26 @@ module Graph = struct
   end
 
   module Exec_rule = struct
+    (* How a rule's execution ended. The first three are successful outcomes;
+       the rest record a rule that never completed. [Dep_fail] is a failure
+       raised before the rule's dependencies were resolved and [Action_fail]
+       one raised after, while [Cancelled] means the build was torn down
+       around the rule (so it is not the rule's own failure). *)
     type outcome =
       | Executed
       | Local_cache_hit
       | Shared_cache_hit
+      | Dep_fail
+      | Action_fail
+      | Cancelled
 
     let outcome_to_string = function
       | Executed -> "executed"
       | Local_cache_hit -> "local-cache-hit"
       | Shared_cache_hit -> "shared-cache-hit"
+      | Dep_fail -> "dep-fail"
+      | Action_fail -> "action-fail"
+      | Cancelled -> "cancelled"
     ;;
 
     let start ~async_id ~rule_id ~dir ~target_files ~target_dirs ~forced_by ~start =
