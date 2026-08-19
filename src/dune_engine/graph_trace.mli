@@ -76,17 +76,34 @@ end
 module Build_dep : sig
   (** Trace building a single dependency as an async span, recording it as the
       [forced_by] context while [f] runs. Each function starts the span for the
-      relevant dep and passes [f] a callback to emit the finish once the dep's
-      outcome is known. *)
+      relevant dep and passes [f] a callback reporting what the dep resolved to.
+
+      That callback only reports: the span ends when [f] does, so its duration
+      covers the building. Call it as soon as the resolution is known, ahead of
+      the building that may fail -- if [f] raises without having called it, the
+      span ends unresolved, and a dep whose resolution dune could not determine
+      is a good deal less useful than one it could. *)
 
   (** A file dep: the callback takes the rule that produces the file, or [None]
-      if it is a source file. *)
+      if it is a source file. Known once the rule is looked up, so it should be
+      called before the rule is executed. *)
   val file : Path.t -> ((Rule.t option -> unit) -> 'a Memo.t) -> 'a Memo.t
 
-  (** An alias dep: the callback takes the facts the alias expanded to. *)
-  val alias : Alias.t -> ((Dep.Facts.t list -> unit) -> 'a Memo.t) -> 'a Memo.t
+  (** An alias dep: the callback takes the facts the alias expanded to. Those are
+      a product of the very building that may fail, so unlike the other two there
+      is nothing to report ahead of it; [recover] is called instead when [f]
+      raises, and should re-walk the alias's definitions to their deps without
+      building them. It is not called for a cancellation, nor if the facts were
+      already reported. *)
+  val alias
+    :  Alias.t
+    -> recover:(unit -> Dep.Set.t Memo.t)
+    -> ((Dep.Facts.t list -> unit) -> 'a Memo.t)
+    -> 'a Memo.t
 
-  (** A file-selector (glob) dep: the callback takes the files it matched. *)
+  (** A file-selector (glob) dep: the callback takes the files it matched. Known
+      once the selector is evaluated, so it should be called before those files
+      are built. *)
   val file_selector
     :  File_selector.t
     -> ((Filename_set.t -> unit) -> 'a Memo.t)

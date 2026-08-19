@@ -385,12 +385,12 @@ module Internal = struct
 
   and build_file_selector_impl file_selector =
     Graph_trace.Build_dep.file_selector file_selector
-    @@ fun trace_finish ->
+    @@ fun trace_resolved ->
     let* files = eval_pred file_selector in
+    trace_resolved files;
     let+ fact = Dep.Fact.Files.create files ~build_file in
     (* Fact: [file_selector] expands to the set of [files] whose digests are captured
        via [build_file]; also, the [File_selector.dir] exists (though it may be empty) *)
-    trace_finish files;
     Dep.Fact.file_selector file_selector fact
 
   (* [build_dep] turns a [Dep.t] which is a description of a dependency into a
@@ -876,13 +876,14 @@ module Internal = struct
         contents
     in
     Graph_trace.Build_dep.file path
-    @@ fun trace_finish ->
+    @@ fun trace_resolved ->
     Load_rules.get_rule_or_source path
     >>= function
     | Source digest ->
-      trace_finish None;
+      trace_resolved None;
       Memo.return (digest, File_target)
     | Rule (path, rule) ->
+      trace_resolved (Some rule);
       let* { facts = _; targets } =
         Memo.push_stack_frame
           (fun () -> execute_rule rule)
@@ -930,7 +931,6 @@ module Internal = struct
                 target
             ]
       in
-      trace_finish (Some rule);
       result
 
   and execute_anonymous_action action =
@@ -948,8 +948,15 @@ module Internal = struct
     | Action x -> dep_on_anonymous_action x
 
   and build_alias_impl alias =
-    Graph_trace.Build_dep.alias alias
-    @@ fun trace_finish ->
+    Graph_trace.Build_dep.alias alias ~recover:(fun () ->
+      (* The same walk as below, but collecting deps rather than facts, so it
+           reaches the alias's expansion without building it. *)
+      Load_rules.get_alias_definition alias
+      >>= Memo.parallel_map ~f:(fun (_loc, definition) ->
+        Action_builder.evaluate_and_collect_deps (dep_on_alias_definition definition)
+        >>| snd)
+      >>| Dep.Set.union_all)
+    @@ fun trace_resolved ->
     let+ l =
       Load_rules.get_alias_definition alias
       >>= Memo.parallel_map ~f:(fun (loc, definition) ->
@@ -960,7 +967,7 @@ module Internal = struct
              >>| snd)
           ~human_readable_description:(fun () -> Alias.describe alias ~loc))
     in
-    trace_finish l;
+    trace_resolved l;
     Dep.Facts.group_paths_as_fact_files l
 
   and eval_pred_impl g =
