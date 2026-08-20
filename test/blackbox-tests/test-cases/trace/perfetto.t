@@ -542,14 +542,15 @@ doc/dev/trace-graph-perfetto.md):
   1
 
 Overriding the chunk size (bytes) via `DUNE_TRACE_GRAPH_CHUNK_SIZE` forces
-several chunks per section without needing a multi-megabyte trace. The total
-record count across all chunks of the graph blob must stay the same as the
-unsplit run, proving the splitter never breaks a record across a chunk
-boundary:
+several chunks per section without needing a multi-megabyte trace. Records are
+newline-terminated, so [decode_all] stitches the chunks by plain concatenation
+-- no rejoining of records at the seams. The total record count must stay the
+same as the unsplit run, proving the splitter never breaks a record across a
+chunk boundary and never drops the separator at one:
 
   $ decode_all() {
   >   sed -n 's/^ *str: "\([0-9][0-9]*\\t.*\)"$/\1/p' dump.textpb \
-  >   | while IFS= read -r chunk; do printf '%b\n' "$chunk"; done
+  >   | while IFS= read -r chunk; do printf '%b' "$chunk"; done
   > }
   $ unsplit_chunks=$(grep -c '^ *str: "[0-9][0-9]*\\t' dump.textpb)
   $ unsplit_records=$(decode_all | wc -l)
@@ -563,6 +564,19 @@ boundary:
   yes
   $ test "$split_records" = "$unsplit_records" && echo yes
   yes
+
+Every chunk ends with a record terminator, including the last one before a
+split, so a consumer can concatenate a section's chunks in `seq` order and get
+the payload back byte for byte:
+
+  $ export DUNE_TRACE_GRAPH_CHUNK_SIZE=64
+  $ dune trace perfetto --text > dump.textpb
+  $ chunks=$(grep -c '^ *str: "[0-9][0-9]*\\t' dump.textpb)
+  $ terminated=$(grep -c '^ *str: "[0-9][0-9]*\\t.*\\n"$' dump.textpb)
+  $ test "$chunks" -gt 1 && test "$chunks" = "$terminated" && echo yes
+  yes
+  $ unset DUNE_TRACE_GRAPH_CHUNK_SIZE
+  $ dune trace perfetto --text > dump.textpb
 
 A value containing the characters our own escaping must protect -- here, a
 backslash -- is round-tripped rather than corrupting the record's framing;

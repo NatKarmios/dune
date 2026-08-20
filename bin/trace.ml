@@ -317,23 +317,27 @@ module Graph_blob = struct
     Buffer.contents buf
   ;;
 
-  (* Join [records] with newlines, splitting into chunks of at most
-     [chunk_size] bytes without ever splitting inside a record (a single
-     over-long record gets a chunk of its own). [] in, [] out. *)
+  (* Split [records] into chunks of at most [chunk_size] bytes, never
+     splitting inside a record (a single over-long record gets a chunk of its
+     own). Records are newline-*terminated* rather than newline-separated, so
+     the last record of a chunk keeps its newline: concatenating the chunks in
+     order reproduces the payload byte for byte, and a chunk read on its own
+     still holds a whole number of records. [] in, [] out. *)
   let chunks records =
     let limit = Lazy.force chunk_size in
     let flush chunks cur =
       match cur with
       | [] -> chunks
-      | _ :: _ -> String.concat ~sep:"\n" (List.rev cur) :: chunks
+      | _ :: _ -> String.concat ~sep:"" (List.rev cur) :: chunks
     in
     let chunks, cur, _cur_len =
       List.fold_left records ~init:([], [], 0) ~f:(fun (chunks, cur, cur_len) r ->
+        let r = r ^ "\n" in
         let r_len = String.length r in
         match cur with
         | [] -> chunks, [ r ], r_len
-        | _ :: _ when cur_len + 1 + r_len > limit -> flush chunks cur, [ r ], r_len
-        | _ :: _ -> chunks, r :: cur, cur_len + 1 + r_len)
+        | _ :: _ when cur_len + r_len > limit -> flush chunks cur, [ r ], r_len
+        | _ :: _ -> chunks, r :: cur, cur_len + r_len)
     in
     List.rev (flush chunks cur)
   ;;

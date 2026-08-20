@@ -195,12 +195,16 @@ and should not depend on flows.
 Instants on track `dune-graph`, timestamped at the last event seen. Five
 event names, each carrying args: `version` (int, `1`), `seq` (int,
 0-based per name), `total` (int, chunk count per name), `data` (string,
-≤ 4 MB, split only on line boundaries). A section with no records emits
+≤ 4 MB, split only on record boundaries). A section with no records emits
 no instant at all, so a build whose dep sets are all too small to factor
 has no `graph-cores` event (and one with no graph data has none of them).
 
-Payloads are line-oriented (`\n`-separated records, `\t`-separated
-fields). Strings escape `\\`, `\t`, `\n` C-style. Integer lists are
+Payloads are line-oriented (`\n`-*terminated* records, `\t`-separated
+fields). Every record carries its terminator, including the last record of
+a chunk, so a consumer reassembles a section by concatenating its `data`
+values in `seq` order — the result is the payload byte for byte, and each
+chunk taken alone holds a whole number of records. Nothing has to be
+stitched back together across a seam. Strings escape `\\`, `\t`, `\n` C-style. Integer lists are
 `,`-separated. All `<*_id>` values referring to paths/deps are intern ids
 resolved via `graph-dict`; `rule_id` is the rule's own id. Each record's
 leading id is also the arg its span's instants carry (`rule_id` /
@@ -332,6 +336,10 @@ Implementation notes / deviations from the schema as originally drafted:
   default), so a test can force multi-chunk framing without a
   multi-megabyte trace. Not a documented user-facing flag — it exists purely
   so `perfetto.t` can exercise the chunker's line-boundary splitting.
+- Records are newline-*terminated*, not newline-separated: the chunker keeps
+  the terminator on the last record of a chunk. Separator framing dropped the
+  newline at every seam, so a consumer concatenating chunks silently glued the
+  records either side of a split into one malformed record.
 - Unmatched begins (see "Unfinished spans" above) are a v1 schema addition
   (`?` for `<outcome>`/`<resolution>`) not present in the original draft of
   this document.
