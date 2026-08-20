@@ -1,10 +1,12 @@
 # Graph trace: Perfetto export redesign
 
-Status: phases 1–7 **implemented**. This document started as the working
+Status: phases 1–8 **implemented**. This document started as the working
 plan, executed phase by phase over multiple agent sessions, and serves as
 the reference for the converter's design and plugin-facing schema. The
 "Plugin-facing schema (v1)" section is the contract; bump `version` on
-breaking change.
+breaking change once it has shipped to the plugin (phase 8's dep-set
+factoring is a breaking change to the blob, but predates that, so it was
+folded into v1 rather than bumped onto a v2).
 
 ## Motivation
 
@@ -80,6 +82,11 @@ crash-safe and streamable — except for one dune-side addition
    converter-internal pairing state, and the plugin joins on the blob keys.
    `gen-rules`/`dynamic-includes` have no blob record and so keep the path
    that identifies them.
+8. **Dep sets are factored into "core + adds"** (phase 8) instead of being
+   spelled out per rule: a rule names its dep set by id, and the set is a
+   shared core plus the ids it adds. Cores are flat, so a consumer
+   reconstructs membership with one join. On a monorepo trace this is 15.6%
+   of the (rule, dep) rows the literal lists cost.
 
 Perfetto ground rules this design leans on:
 
@@ -185,10 +192,12 @@ and should not depend on flows.
 
 ### Graph blob
 
-Instants on track `dune-graph`, timestamped at the last event seen. Three
+Instants on track `dune-graph`, timestamped at the last event seen. Five
 event names, each carrying args: `version` (int, `1`), `seq` (int,
 0-based per name), `total` (int, chunk count per name), `data` (string,
-≤ 4 MB, split only on line boundaries).
+≤ 4 MB, split only on line boundaries). A section with no records emits
+no instant at all, so a build whose dep sets are all too small to factor
+has no `graph-cores` event (and one with no graph data has none of them).
 
 Payloads are line-oriented (`\n`-separated records, `\t`-separated
 fields). Strings escape `\\`, `\t`, `\n` C-style. Integer lists are
@@ -206,7 +215,7 @@ leading id is also the arg its span's instants carry (`rule_id` /
   are per-process and may differ across watch iterations for the same target
   — the plugin should key nodes on resolved target paths when merging):
 
-      <rule_id>\t<dir_id>\t<target_file_ids>\t<target_dir_ids>\t<outcome>\t<forced_by>\t<dep_ids>\t<dyn_dep_stages>
+      <rule_id>\t<dir_id>\t<target_file_ids>\t<target_dir_ids>\t<outcome>\t<forced_by>\t<dep_set>\t<dyn_dep_stages>
 
   `<outcome>`: `X` executed, `L` local cache hit, `S` shared cache hit, `D`
   failed before its deps were resolved, `A` failed after its deps were
@@ -220,10 +229,36 @@ leading id is also the arg its span's instants carry (`rule_id` /
   after it failed, see `<outcome>` `D`) | `d<dep_id>` | `i<path_id>`
   (dynamic-includes) | `g<path_id>` (gen-rules) | `p<path_id>` (pform) |
   `c` (configurator) | `q` (request) | `u` (unknown).
-  `<dyn_dep_stages>`: stages separated by `|`, ids within a stage by `,`;
-  empty when none.
-  `<dep_ids>` is `?` when dune could not determine the rule's deps, which is
-  otherwise indistinguishable from a rule that has none (both empty).
+  `<dep_set>`: the `set_id` of the rule's dep set in `graph-depsets`, empty
+  when the rule has no deps, `?` when dune could not determine them (which
+  an empty field would otherwise not distinguish from having none).
+  `<dyn_dep_stages>`: stages separated by `|`, each stage a `set_id` of its
+  own (stages go through the same dep-set table and the same factoring);
+  empty when there are no stages.
+
+- `graph-cores` — the shared parts of dep sets, one line per core:
+
+      <core_id>\t<dep_ids>
+
+  A core is flat: its `<dep_ids>` are intern ids, never other cores'. Absent
+  entirely when nothing in the build was worth factoring.
+
+- `graph-depsets` — one line per distinct dep set (rule dep sets and
+  dyn-dep stages share this table), ordered by `set_id`:
+
+      <set_id>\t<core_id>\t<add_ids>
+
+  `deps(S) = core_members(<core_id>) + <add_ids>`, and that is the whole
+  reconstruction: cores being flat, membership is one join deep and can be a
+  plain SQL view. `<core_id>` is empty for a set with no core, in which case
+  the adds are the entire set. `<add_ids>` can in principle be empty (a
+  consumer must parse that), but the encoder never emits it: a core is
+  always a strict subset of its set.
+
+  Rules referring to the same set share its `set_id`; the id is per-process,
+  like `rule_id`. A dep set is a *set*: the ids in a core or an adds list are
+  sorted (as text) and duplicate-free, so a rule's declaration order is not
+  recoverable from the blob, which the literal id lists used to preserve.
 
 - `graph-deps` — one line per build-dep span, ordered by span end:
 
@@ -244,7 +279,7 @@ leading id is also the arg its span's instants carry (`rule_id` /
   end — see `test/blackbox-tests/test-cases/trace/interrupted-watch-build-events.t`
   for a trace that can produce these): the converter flushes each open span
   at EOF as a `graph-rules`/`graph-deps` line with `?` in place of `<outcome>`
-  /`<resolution>` and empty `<dep_ids>`/`<dyn_dep_stages>`/`<status>`, appended
+  /`<resolution>` and empty `<dep_set>`/`<dyn_dep_stages>`/`<status>`, appended
   after the completed lines and sorted by `async_id` for determinism. Every line
   of a given kind has the same field count however it was produced.
 
@@ -642,6 +677,94 @@ Implementation notes:
   blob was introduced to make; the flows and `dur_ns` (see the debug-track
   recipe) are what the stock UI still answers on its own.
 
+### Phase 8 — factored dep sets (converter-only) — **implemented**
+
+Motivation: `graph-rules` spelled each rule's deps out as a literal id list,
+so a consumer scraping the blob into a database got one edge row per
+(rule, dep) pair. Measured on a real monorepo trace (551 MB, 386,320
+`exec-rule` spans): **28,101,156 pairs, but only 205,224 distinct dep
+sets** — the same sets over and over, and near-misses of each other.
+
+Changes (dune-side events and `dune trace cat` are untouched — the csexp
+still carries the literal dep lists):
+
+- Two new sections, `graph-cores` and `graph-depsets`, per the schema above.
+  `graph-rules`' seventh field becomes a `set_id`; the empty-vs-`?`
+  distinction is unchanged, and each `<dyn_dep_stages>` stage becomes a
+  `set_id` too, through the same table.
+- `Graph_blob.Dep_sets` in `bin/trace.ml` holds the encoder. It runs
+  **online**, as each `exec-rule` end is handled (that order is the
+  emission order the window below slides over), not as a post-pass: only
+  the window, the pool, and the map from set to `set_id` persist. Sets are
+  stored as their exact members (sorted, deduplicated id lists), not as
+  digests — a hash collision would silently corrupt the graph.
+
+The algorithm, for each **new distinct** non-empty set `S` (an identical set
+reuses its id and touches nothing else):
+
+1. **Reuse.** Take the largest core `C` in the pool with `C ⊆ S`. Accept it
+   only if `|C| ≥ 0.5·|S|`.
+2. **Mine.** Failing that, take the set `B` in the window maximising
+   `|S ∩ B|`, subject to `|S ∩ B| ≥ max(16, 0.5·|S|)`. If there is one,
+   `C = S ∩ B` is registered as a core (reusing an existing core id if that
+   exact set is already a core) and pushed onto the pool — whether or not
+   step 3 then uses it, so that a shape seen twice becomes reusable.
+3. `C` is used only if `16 ≤ |C| < |S|`; then the set's adds are `S \ C`.
+   Otherwise the set has no core and its adds are all of `S`.
+4. `S` is pushed onto the window either way.
+
+Constants: **window 32** distinct sets, **pool 64** cores, **minimum
+overlap fraction 0.5**, **minimum core size 16**. These were selected by
+measurement over the monorepo trace, not by taste; in particular a *larger*
+core pool measured **worse** (a big pool keeps stale cores that win the
+"largest subset" test with a poor covering, displacing the mining step that
+would have found a better one). Ties everywhere break deterministically —
+lowest core id, oldest window entry — so a given trace converts
+byte-identically.
+
+Cores are deliberately flat: `deps(S) = core_members(C) + adds(S)`, one
+join, no recursion. Chaining cores to cores would compress further and cost
+the consumer the plain-SQL-view property, which is the point of the
+encoding.
+
+Measured on the same trace (converter output, cross-checked against a
+reference implementation of the algorithm in Python, which it matches
+exactly): **700 cores**, **127,399 core-member ids**, **47,170 of 205,224
+sets with a core**, **3,655,880 add ids**. Total rows for the graph's edge
+data: 386,320 rule lines + 205,224 set lines + 3,655,880 adds + 127,399
+core members = **4,374,823, i.e. 15.6% of the 28.1M baseline**.
+Reconstructing `core + adds` for a sample of ~4000 rules reproduces exactly
+the dep sets the pre-change converter emitted, and two runs over the trace
+produce byte-identical protobuf. Bytes were never the bottleneck, but they
+fall too: the converted trace goes from 333.6 MB to 181.4 MB. Converter wall
+time and peak RSS are unchanged to slightly better (36.0 s / 3.7 GB, versus
+36.7 s / 4.4 GB before): the distinct sets it now retains cost less than the
+dep ids the rule lines no longer carry.
+
+- Tests (`perfetto.t`): the new sections' presence (and `graph-cores`'
+  absence on a project whose sets never reach 16 members); a rule line's
+  `set_id` resolved through `graph-depsets` — and, for a 40-file fan-in that
+  does produce a core, through `graph-cores` — back to the dep paths via
+  `graph-dict`; `version` still `1`; and both halves of the empty-vs-`?`
+  distinction on a failing build.
+
+Implementation notes / deviations:
+
+- `version` stays `1`. This is a breaking blob change, but the v1 contract
+  has not shipped to the plugin (see phase 7's open checklist item), so the
+  schema section above was amended in place rather than duplicated as a v2.
+- A core rejected by step 1's `0.5·|S|` test is dropped even when step 2
+  then finds nothing, rather than being carried forward as a
+  smaller-than-half core. The reference implementation carried it forward;
+  measured difference: 47,322 vs 47,170 cored sets, 3,637,736 vs 3,655,880
+  adds (0.3% and 0.5%), i.e. not worth the extra rule.
+- A mined core that already exists is *not* pushed onto the pool a second
+  time: duplicate pool entries would evict live cores for nothing.
+- The dep set and the dyn-dep stages are bound before the `graph-rules`
+  record is assembled, since the elements of an OCaml list expression are
+  not evaluated left to right and the encoder's state makes that order
+  observable.
+
 ## Verification checklist (carry across sessions)
 
 - [x] `debug.dune.*` is the actual args-table key prefix (phase 1, checked
@@ -659,3 +782,6 @@ Implementation notes:
 - [ ] The plugin is updated to the phase 7 arg set (`rule_id`/`dep_id` as the
       only join keys, outcomes read from the blob) before this ships as the
       v1 contract.
+- [ ] The plugin reads dep sets through `graph-depsets`/`graph-cores`
+      (phase 8) rather than a literal id list per rule, and its
+      dep-set-membership view is the single join the flat cores allow.
