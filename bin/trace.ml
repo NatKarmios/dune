@@ -278,13 +278,15 @@ let json_of_event ~chrome (sexp : Sexp.t) =
 ;;
 
 (* The build-graph blob: a chunked dump of the graph's structure (the intern
-   table, and one record per exec-rule/build-dep span), emitted as instants on
-   a dedicated "dune-graph" track instead of scattering it across per-slice
-   debug annotations (see doc/dev/trace-graph-perfetto.md, phase 1). Payloads
-   are line-oriented, tab-separated records; this module only knows how to
-   render the pieces of a single record (a forced-by tag, a dep outcome, a
-   rule outcome) and how to chunk and escape the assembled lines. It has no
-   converter state. *)
+   table, the factored dep-set table, and one record per exec-rule/build-dep
+   span), emitted as instants on a dedicated "dune-graph" track instead of
+   scattering it across per-slice debug annotations (see
+   doc/dev/trace-graph-perfetto.md, phase 1). Payloads are line-oriented,
+   tab-separated records; this module knows how to render the pieces of a
+   single record (a forced-by tag, a dep outcome, a rule outcome) and how to
+   chunk and escape the assembled lines. The only converter state it holds is
+   the dep-set table ([Dep_sets], phase 8), which is inseparable from
+   rendering a dep field. *)
 module Graph_blob = struct
   let version = 1
   let default_chunk_size = 4 * 1024 * 1024
@@ -391,9 +393,205 @@ module Graph_blob = struct
 
   let ids_field ids = String.concat ~sep:"," ids
 
-  let dyn_deps_field stages =
-    String.concat ~sep:"|" (List.map stages ~f:(String.concat ~sep:","))
-  ;;
+  (* Dep sets are not spelled out per rule: a [graph-rules] line names its
+     dep set by id, [graph-depsets] describes each distinct set as a core
+     plus the ids it adds to that core, and [graph-cores] holds the cores.
+     Cores are flat -- a core never references another core -- so
+     reconstructing a set is exactly one join deep:
+     [deps(S) = core_members(C) + adds(S)]. On a monorepo trace this turns
+     28.1M (rule, dep) pairs into ~16% as many rows; see
+     doc/dev/trace-graph-perfetto.md for the measurements behind the
+     constants below.
+
+     The encoder is online: sets are encoded as their rules' spans end, and
+     the only state that grows with the trace is the table of distinct sets
+     (which replaces the dep ids the rule lines used to carry). *)
+  module Dep_sets = struct
+    (* Chosen by measurement on a real monorepo trace, not by taste: a
+       larger core pool measured worse (stale cores win the "largest
+       subset" test with a poor covering and displace the mining step). *)
+    let window_size = 32
+    let pool_size = 64
+    let min_core_size = 16
+
+    (* A dep set is a sorted, duplicate-free list of dep ids; [ids_field] of
+       it is both its exact identity (no hashing: a digest collision would
+       silently corrupt the graph) and what gets emitted. *)
+    let of_ids ids = List.sort_uniq ids ~compare:String.compare
+
+    let rec is_subset a ~of_:b =
+      match a, b with
+      | [], _ -> true
+      | _ :: _, [] -> false
+      | x :: a', y :: b' ->
+        (match String.compare x y with
+         | Eq -> is_subset a' ~of_:b'
+         | Gt -> is_subset a ~of_:b'
+         | Lt -> false)
+    ;;
+
+    let rec inter a b =
+      match a, b with
+      | [], _ | _, [] -> []
+      | x :: a', y :: b' ->
+        (match String.compare x y with
+         | Eq -> x :: inter a' b'
+         | Lt -> inter a' b
+         | Gt -> inter a b')
+    ;;
+
+    let rec diff a b =
+      match a, b with
+      | [], _ -> []
+      | _ :: _, [] -> a
+      | x :: a', y :: b' ->
+        (match String.compare x y with
+         | Eq -> diff a' b'
+         | Lt -> x :: diff a' b
+         | Gt -> diff a b')
+    ;;
+
+    (* [l] truncated to its first [n] elements (used on the window and the
+       pool, both tiny). *)
+    let keep n l = List.filteri l ~f:(fun i _ -> i < n)
+
+    type t =
+      { set_ids : (string, int) Table.t
+      ; core_ids : (string, int) Table.t
+      ; mutable rev_set_lines : string list
+      ; mutable rev_core_lines : string list
+      ; mutable next_set_id : int
+      ; mutable next_core_id : int
+      ; (* The last [window_size] distinct sets, newest first: the
+           candidates a new core is mined from. *)
+        mutable window : string list list
+      ; (* The last [pool_size] registered cores (id and members), newest
+           first: the candidates a set can reuse a core from. *)
+        mutable pool : (int * string list) list
+      }
+
+    let create () =
+      { set_ids = Table.create (module String) 2048
+      ; core_ids = Table.create (module String) 256
+      ; rev_set_lines = []
+      ; rev_core_lines = []
+      ; next_set_id = 0
+      ; next_core_id = 0
+      ; window = []
+      ; pool = []
+      }
+    ;;
+
+    let core_lines t = List.rev t.rev_core_lines
+    let set_lines t = List.rev t.rev_set_lines
+
+    (* The largest pooled core contained in [s]. The pool is newest first
+       and a tie replaces the incumbent, so ties go to the oldest (lowest
+       id) core: the output must not depend on pool churn. *)
+    let largest_contained_core t s =
+      List.fold_left t.pool ~init:None ~f:(fun best (id, c) ->
+        if not (is_subset c ~of_:s)
+        then best
+        else (
+          match best with
+          | Some (_, b) when List.length b > List.length c -> best
+          | _ -> Some (id, c)))
+    ;;
+
+    (* [s]'s intersection with the window entry it shares the most ids with,
+       if that is at least [min_overlap] ids. Ties go to the older entry,
+       for the same reason as above. *)
+    let mine t s ~min_overlap =
+      List.fold_left t.window ~init:None ~f:(fun best b ->
+        let candidate = inter s b in
+        let size = List.length candidate in
+        if size < min_overlap
+        then best
+        else (
+          match best with
+          | Some b when List.length b > size -> best
+          | _ -> Some candidate))
+    ;;
+
+    (* Cores are emitted as they are registered. An identical core keeps its
+       id, and is not pushed onto the pool a second time. *)
+    let register_core t c =
+      let key = ids_field c in
+      match Table.find t.core_ids key with
+      | Some id -> id
+      | None ->
+        let id = t.next_core_id in
+        t.next_core_id <- id + 1;
+        Table.set t.core_ids key id;
+        t.rev_core_lines <- sprintf "%d\t%s" id key :: t.rev_core_lines;
+        t.pool <- keep pool_size ((id, c) :: t.pool);
+        id
+    ;;
+
+    (* The core of a new distinct set [s] of [size] ids, if it gets one:
+       either a pooled core covering at least half of [s], or, failing that,
+       one mined from the window (registered as a core here whether or not
+       the size test below then accepts it, so that a shape seen twice in
+       the window becomes reusable). A core must have at least
+       [min_core_size] ids to be worth a join, and must be a strict subset
+       so that the set says something of its own. *)
+    let core_of t s ~size =
+      let core =
+        match largest_contained_core t s with
+        | Some (id, c) when 2 * List.length c >= size -> Some (id, c)
+        | _ ->
+          (match mine t s ~min_overlap:(max min_core_size ((size + 1) / 2)) with
+           | Some c -> Some (register_core t c, c)
+           | None -> None)
+      in
+      match core with
+      | None -> None
+      | Some (_, c) ->
+        let n = List.length c in
+        if n >= min_core_size && n < size then core else None
+    ;;
+
+    (* The id of the dep set [ids], registering it (and possibly a new core)
+       on first sight. [None] for the empty set: a rule with no deps has an
+       empty dep field rather than a set id of its own. *)
+    let encode t ids =
+      match of_ids ids with
+      | [] -> None
+      | s ->
+        let key = ids_field s in
+        (match Table.find t.set_ids key with
+         | Some id -> Some id
+         | None ->
+           let core = core_of t s ~size:(List.length s) in
+           let id = t.next_set_id in
+           t.next_set_id <- id + 1;
+           Table.set t.set_ids key id;
+           let core_field, adds =
+             match core with
+             | None -> "", key
+             | Some (core_id, c) -> string_of_int core_id, ids_field (diff s c)
+           in
+           t.rev_set_lines <- sprintf "%d\t%s\t%s" id core_field adds :: t.rev_set_lines;
+           t.window <- keep window_size (s :: t.window);
+           Some id)
+    ;;
+
+    (* A rule's dep set as its [graph-rules] field: the set id, or empty for
+       a rule with no deps. ("?", for deps dune could not determine, is
+       rendered by the caller.) *)
+    let field t ids =
+      match encode t ids with
+      | None -> ""
+      | Some id -> string_of_int id
+    ;;
+
+    (* The dyn-dep stages field: stages separated by "|", each stage a dep
+       set of its own (so stages go through the same table and the same
+       factoring); empty when there are no stages. *)
+    let stages_field t stages =
+      String.concat ~sep:"|" (List.map stages ~f:(fun stage -> field t stage))
+    ;;
+  end
 end
 
 (* Perfetto native-protobuf export. Consumes the same csexp event stream as
@@ -498,6 +696,9 @@ module Perfetto_conv = struct
       mutable next_flow_id : int
     ; mutable rev_rule_lines : string list
     ; mutable rev_dep_lines : string list
+    ; (* The factored dep-set table the rule lines' dep fields point into
+         (see [Graph_blob.Dep_sets]), filled as rule spans end. *)
+      dep_sets : Graph_blob.Dep_sets.t
     }
 
   let create () =
@@ -514,6 +715,7 @@ module Perfetto_conv = struct
     ; next_flow_id = 1
     ; rev_rule_lines = []
     ; rev_dep_lines = []
+    ; dep_sets = Graph_blob.Dep_sets.create ()
     }
   ;;
 
@@ -908,6 +1110,20 @@ module Perfetto_conv = struct
                | _ -> [])
            | _ -> []
          in
+         (* The dep set and each dyn-dep stage are registered in the
+            factored dep-set table here, in span-end order -- that order is
+            what the factoring's window slides over, so they are bound
+            before the record is assembled rather than inline in it (the
+            elements of a list expression are not evaluated left to
+            right). *)
+         let dep_set =
+           (* [deps] is empty both for a rule with no deps and for one whose
+              deps could not be determined; "?" tells them apart. *)
+           match field "deps_unknown" rest with
+           | Some (Sexp.Atom "true") -> "?"
+           | _ -> Graph_blob.Dep_sets.field t.dep_sets (ids "deps")
+         in
+         let dyn_dep_stages = Graph_blob.Dep_sets.stages_field t.dep_sets dyn_deps in
          let line =
            String.concat
              ~sep:"\t"
@@ -917,12 +1133,8 @@ module Perfetto_conv = struct
              ; Graph_blob.ids_field b.target_dirs
              ; Graph_blob.rule_outcome_code rule_outcome
              ; Graph_blob.forced_by_code b.forced_by
-               (* [deps] is empty both for a rule with no deps and for one
-                  whose deps could not be determined; "?" tells them apart. *)
-             ; (match field "deps_unknown" rest with
-                | Some (Sexp.Atom "true") -> "?"
-                | _ -> Graph_blob.ids_field (ids "deps"))
-             ; Graph_blob.dyn_deps_field dyn_deps
+             ; dep_set
+             ; dyn_dep_stages
              ]
          in
          t.rev_rule_lines <- line :: t.rev_rule_lines;
@@ -1234,6 +1446,15 @@ module Perfetto_conv = struct
     then (
       ensure_process t;
       push_graph_section t ~name:"graph-dict" dict;
+      (* The cores and the dep sets were encoded as the rule spans ended;
+         only their emission waits for EOF, like the other sections. A
+         section with no records emits no instant at all, so a build whose
+         dep sets are all too small to factor has no [graph-cores]. *)
+      push_graph_section t ~name:"graph-cores" (Graph_blob.Dep_sets.core_lines t.dep_sets);
+      push_graph_section
+        t
+        ~name:"graph-depsets"
+        (Graph_blob.Dep_sets.set_lines t.dep_sets);
       push_graph_section t ~name:"graph-rules" rules;
       push_graph_section t ~name:"graph-deps" deps);
     List.rev t.rev_packets

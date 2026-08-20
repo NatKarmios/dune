@@ -400,6 +400,17 @@ dependency-array element:
   $ grep -q 'name: "data"' dump.textpb && echo yes
   yes
 
+Dep sets are factored rather than spelled out per rule: `graph-depsets` names
+each distinct set as a core plus the ids it adds to that core, and `graph-cores`
+holds the cores. A core only exists once a set has at least 16 members -- this
+project's rules have two deps at most, so every set here stands alone, the
+section has no records at all, and a section with no records emits no instant:
+
+  $ grep -q 'name: "graph-depsets"' dump.textpb && echo yes
+  yes
+  $ grep -q 'name: "graph-cores"' dump.textpb && echo yes
+  [1]
+
 Each chunk's payload is one `str:` debug-annotation value. Decode the first
 (here: only) chunk of a named section by finding its packet and undoing the
 text dump's own escaping of that value, leaving our own tab/newline/backslash
@@ -425,10 +436,9 @@ file:
   1
 
 A graph-rules record is `<rule_id>~<dir_id>~<target_file_ids>~<target_dirs>~
-<outcome>~<forced_by>~<dep_ids>~<dyn_dep_stages>`. Resolving the dict ids of
+<outcome>~<forced_by>~<dep_set>~<dyn_dep_stages>`. Resolving the dict ids of
 "_build/default" and "out.txt" against it finds the rule that builds out.txt:
-executed (not a cache hit -- "X"), with no directory targets, depending on
-dep.txt and the glob (in declaration order):
+executed (not a cache hit -- "X"), with no directory targets:
 
   $ dir_id=$(decode_section graph-dict | grep '~_build/default$' | cut -d~ -f1)
   $ out_id=$(decode_section graph-dict | grep '~out.txt$' | cut -d~ -f1)
@@ -437,8 +447,54 @@ dep.txt and the glob (in declaration order):
   $ out_rule=$(decode_section graph-rules | grep "^[0-9]*~$dir_id~$out_id~~X~")
   $ test -n "$out_rule" && echo yes
   yes
-  $ test "$(echo "$out_rule" | cut -d~ -f7)" = "$dep_id,$glob_id" && echo yes
+
+Its `<dep_set>` is not a dep list but the id of an entry in `graph-depsets`,
+whose record is `<set_id>~<core_id>~<add_ids>`. Reconstructing a set is one
+join deep: the (flat) core's members, if it has a core, plus the ids the set
+adds. Here there is no core, so the adds are the whole set:
+
+  $ dep_set_ids() {
+  >   row=$(decode_section graph-depsets | grep "^$1~")
+  >   core=$(echo "$row" | cut -d~ -f2)
+  >   { if test -n "$core"; then
+  >       decode_section graph-cores | grep "^$core~" | cut -d~ -f2 | tr ',' '\n'
+  >     fi
+  >     echo "$row" | cut -d~ -f3 | tr ',' '\n'; } | grep . | sort -n
+  > }
+  $ out_set=$(echo "$out_rule" | cut -d~ -f7)
+  $ test -z "$(decode_section graph-depsets | grep "^$out_set~" | cut -d~ -f2)" \
+  >   && echo yes
   yes
+
+The set resolves back to exactly the deps the rule was declared with -- dep.txt
+and the glob -- both as dict ids and, through the dict, as paths:
+
+  $ test "$(dep_set_ids "$out_set")" \
+  >   = "$(printf '%s\n' "$dep_id" "$glob_id" | sort -n)" && echo yes
+  yes
+  $ for id in $(dep_set_ids "$out_set"); do
+  >   decode_section graph-dict | grep "^$id~" | cut -d~ -f2-
+  > done | sort
+  _build/default/*.src
+  _build/default/dep.txt
+
+A rule with no deps at all has an *empty* `<dep_set>`, not a set id -- set ids
+start at 0, so this distinction matters. dep.txt's rule is one (and its
+dyn-dep stages, also set ids when there are any, are empty too):
+
+  $ dep_target_id=$(decode_section graph-dict | grep '~dep.txt$' | cut -d~ -f1)
+  $ dep_rule=$(decode_section graph-rules | grep "^[0-9]*~$dir_id~$dep_target_id~~X~")
+  $ test -n "$dep_rule" && echo yes
+  yes
+  $ echo "$dep_rule" | cut -d~ -f7,8
+  ~
+
+Nothing in this build has deps dune could not determine, so no record carries
+the "?" that would say so (see the failing build at the end of this file):
+
+  $ decode_section graph-rules | cut -d~ -f7 | grep -c '?'
+  0
+  [1]
 
 The matching graph-deps records (`<dep_id>~<resolution>~<forced_by>`) resolve
 dep.txt to the rule that produces it ("r<rule_id>"), and the glob to its
@@ -474,6 +530,16 @@ each such event is its dep:
   > }
   $ first_int_arg build-dep-start | sort -u | grep -qx "$dep_id" && echo yes
   yes
+
+`version` is the first int arg of a section instant, and stays 1: the dep-set
+sections were folded into the v1 schema rather than bumped onto a v2, the
+contract not having shipped to the plugin yet (see
+doc/dev/trace-graph-perfetto.md):
+
+  $ first_int_arg graph-rules | sort -u
+  1
+  $ first_int_arg graph-depsets | sort -u
+  1
 
 Overriding the chunk size (bytes) via `DUNE_TRACE_GRAPH_CHUNK_SIZE` forces
 several chunks per section without needing a multi-megabyte trace. The total
@@ -539,3 +605,110 @@ Cache hits execute no action, so this trace has no exec-rule-action instants
   [1]
   $ event_args | grep -q '^exec-rule-action-' && echo yes
   [1]
+
+Cores appear once dep sets are big enough for one to pay for itself (16 ids).
+Two rules with a 40-file fan-in, the second additionally depending on the
+first's target: when the second set is encoded, the first is still in the
+encoder's window of recent sets, so their intersection is mined into a core --
+one core, holding the 40 shared ids:
+
+  $ for i in $(seq 1 40); do touch w$i.dep; done
+  $ deps=$(seq 1 40 | sed 's/.*/w&.dep/' | tr '\n' ' ')
+  $ cat >dune <<EOF
+  > (rule
+  >  (target a.txt)
+  >  (deps $deps)
+  >  (action (with-stdout-to a.txt (echo hi))))
+  > (rule
+  >  (target b.txt)
+  >  (deps $deps a.txt)
+  >  (action (with-stdout-to b.txt (echo hi))))
+  > EOF
+  $ DUNE_TRACE=+graph dune build b.txt
+  $ dune trace perfetto --text > dump.textpb
+  $ decode_section graph-cores | grep -c .
+  1
+  $ core_id=$(decode_section graph-cores | cut -d~ -f1)
+  $ decode_section graph-cores | cut -d~ -f2 | tr ',' '\n' | grep -c .
+  40
+
+The first rule's set is the one the core was mined from, so it has no core of
+its own; the second's is that core plus a single add, a.txt:
+
+  $ dir_id=$(decode_section graph-dict | grep '~_build/default$' | cut -d~ -f1)
+  $ a_id=$(decode_section graph-dict | grep '~a.txt$' | cut -d~ -f1)
+  $ b_id=$(decode_section graph-dict | grep '~b.txt$' | cut -d~ -f1)
+  $ a_set=$(decode_section graph-rules | grep "^[0-9]*~$dir_id~$a_id~~X~" | cut -d~ -f7)
+  $ b_row=$(decode_section graph-depsets | grep "^$(decode_section graph-rules \
+  >   | grep "^[0-9]*~$dir_id~$b_id~~X~" | cut -d~ -f7)~")
+  $ test -z "$(decode_section graph-depsets | grep "^$a_set~" | cut -d~ -f2)" \
+  >   && echo yes
+  yes
+  $ test "$(echo "$b_row" | cut -d~ -f2)" = "$core_id" && echo yes
+  yes
+  $ add_id=$(echo "$b_row" | cut -d~ -f3)
+  $ decode_section graph-dict | grep "^$add_id~" | cut -d~ -f2-
+  _build/default/a.txt
+
+Reconstruction stays one join deep: the core's members are exactly the first
+rule's set, and the second rule's set is that plus its own add:
+
+  $ b_set=$(echo "$b_row" | cut -d~ -f1)
+  $ dep_set_ids "$a_set" | wc -l
+  40
+  $ dep_set_ids "$b_set" | wc -l
+  41
+  $ test "$(decode_section graph-cores | cut -d~ -f2 | tr ',' '\n' | sort -n)" \
+  >   = "$(dep_set_ids "$a_set")" && echo yes
+  yes
+  $ test "$(dep_set_ids "$b_set")" \
+  >   = "$(printf '%s\n' $(dep_set_ids "$a_set") "$add_id" | sort -n)" && echo yes
+  yes
+
+Finally the other half of the empty-vs-"?" distinction, on a failing build.
+Three rules: one that fails in its action, one that fails building that as a
+dep, and one that fails the same way but whose deps cannot even be recovered
+afterwards, its dep being behind a `%{read:}` of the broken file (see
+`recover_deps` in `src/dune_engine/graph_trace.ml`):
+
+  $ cat >dune <<EOF
+  > (rule
+  >  (target broken.txt)
+  >  (action (with-stdout-to broken.txt (bash "exit 1"))))
+  > (rule
+  >  (target needs-broken.txt)
+  >  (deps broken.txt)
+  >  (action (copy broken.txt needs-broken.txt)))
+  > (rule
+  >  (target reads-broken.txt)
+  >  (action (with-stdout-to reads-broken.txt (echo %{read:broken.txt}))))
+  > EOF
+  $ DUNE_TRACE=+graph dune build needs-broken.txt reads-broken.txt 2> /dev/null
+  [1]
+  $ dune trace perfetto --text > dump.textpb
+  $ dir_id=$(decode_section graph-dict | grep '~_build/default$' | cut -d~ -f1)
+  $ broken_id=$(decode_section graph-dict | grep '~broken.txt$' | cut -d~ -f1)
+  $ needs_id=$(decode_section graph-dict | grep '~needs-broken.txt$' | cut -d~ -f1)
+  $ reads_id=$(decode_section graph-dict | grep '~reads-broken.txt$' | cut -d~ -f1)
+
+The action failure ("A") had resolved no deps, so its `<dep_set>` (and its
+dyn-dep stages) are empty:
+
+  $ decode_section graph-rules | grep "^[0-9]*~$dir_id~$broken_id~~A~" | cut -d~ -f7,8
+  ~
+
+The dep failure ("D") that recovered its deps names the set holding them,
+which resolves back to the file it was waiting for:
+
+  $ needs_set=$(decode_section graph-rules \
+  >   | grep "^[0-9]*~$dir_id~$needs_id~~D~" | cut -d~ -f7)
+  $ for id in $(dep_set_ids "$needs_set"); do
+  >   decode_section graph-dict | grep "^$id~" | cut -d~ -f2-
+  > done
+  _build/default/broken.txt
+
+The one whose deps could not be recovered says "?", which an empty field would
+not distinguish from having none:
+
+  $ decode_section graph-rules | grep "^[0-9]*~$dir_id~$reads_id~~D~" | cut -d~ -f7
+  ?
