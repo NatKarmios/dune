@@ -620,6 +620,27 @@ Cache hits execute no action, so this trace has no exec-rule-action instants
   $ event_args | grep -q '^exec-rule-action-' && echo yes
   [1]
 
+The collapse is gated on the duration as well as the outcome: a cache hit or
+source dep that took real time (a contended shared cache, a cold page cache)
+keeps its start/finish pair, since there is a genuine interval to show.
+`DUNE_TRACE_COLLAPSE_THRESHOLD_NS` overrides the 1ms threshold, so converting
+this same cache-hit trace with a threshold of 0 collapses nothing -- and the
+pairs emitted in place of the collapsed instants carry flows, which a
+collapsed instant does not:
+
+  $ DUNE_TRACE_COLLAPSE_THRESHOLD_NS=0 dune trace perfetto --text > dump.textpb
+  $ event_args | grep -q -- '-resolved' && echo yes
+  [1]
+  $ event_args | sort -u | grep '^exec-rule'
+  exec-rule-finish TYPE_INSTANT rule_id,dur_ns
+  exec-rule-start TYPE_INSTANT rule_id
+  $ event_args | sort -u | grep '^build-dep'
+  build-dep-finish TYPE_INSTANT dep_id,dur_ns
+  build-dep-start TYPE_INSTANT dep_id
+  $ flow_events | grep -q exec-rule-start && echo yes
+  yes
+  $ dune trace perfetto --text > dump.textpb
+
 Cores appear once dep sets are big enough for one to pay for itself (16 ids).
 Two rules with a 40-file fan-in, the second additionally depending on the
 first's target: when the second set is encoded, the first is still in the

@@ -832,8 +832,29 @@ module Perfetto_conv = struct
   let dep_id_arg s = int_arg ~name:"dep_id" s
   let dur_ns_arg dur_ns = P.Arg.int ~name:"dur_ns" dur_ns
 
-  (* The matched pair (or, for a cache hit, the single collapsed instant) for
-     an exec-rule span, per the "Lifecycle instants" schema
+  (* Collapsing a span to a single instant trades away its interval, which is
+     only honest when there was near-zero interval to lose. A cache hit or
+     source-file dep that took real time -- a contended shared cache, a cold
+     page cache -- is worth seeing as a span, so the collapse is gated on the
+     duration as well as the outcome. Overridable (to 0, in particular) so a
+     test can pin the choice instead of racing the clock; negative or
+     unparseable values are ignored. *)
+  let default_collapse_threshold_ns = 1_000_000
+
+  let collapse_threshold_ns =
+    lazy
+      (match Sys.getenv_opt "DUNE_TRACE_COLLAPSE_THRESHOLD_NS" with
+       | None -> default_collapse_threshold_ns
+       | Some s ->
+         (match int_of_string_opt s with
+          | Some n when n >= 0 -> n
+          | _ -> default_collapse_threshold_ns))
+  ;;
+
+  let collapses dur_ns = dur_ns < Lazy.force collapse_threshold_ns
+
+  (* The matched pair (or, for a short cache hit, the single collapsed
+     instant) for an exec-rule span, per the "Lifecycle instants" schema
      (doc/dev/trace-graph-perfetto.md). [rule_outcome] is the raw
      [Graph.Exec_rule.outcome_to_string] value; only the blob records it (as a
      letter code), the instants merely collapse on it. A failed or cancelled
@@ -841,8 +862,13 @@ module Perfetto_conv = struct
      cache hit, and which outcome it was is in the blob. *)
   let emit_exec_rule_end t ~ts (b : rule_begin) ~rule_outcome =
     let dur_ns = ts - b.begin_ts in
-    match rule_outcome with
-    | "local-cache-hit" | "shared-cache-hit" ->
+    let is_cache_hit =
+      match rule_outcome with
+      | "local-cache-hit" | "shared-cache-hit" -> true
+      | _ (* "executed", or a failure/cancellation *) -> false
+    in
+    if is_cache_hit && collapses dur_ns
+    then
       push_instant
         t
         ~uuid:exec_rule_uuid
@@ -851,7 +877,7 @@ module Perfetto_conv = struct
         ~ts:b.begin_ts
         ~flow_ids:[]
         ~args:(dune_args (rule_id_arg b.rule_id @ [ dur_ns_arg dur_ns ]))
-    | _ (* "executed", or a failure/cancellation *) ->
+    else (
       push_instant
         t
         ~uuid:exec_rule_uuid
@@ -867,7 +893,7 @@ module Perfetto_conv = struct
         ~name:"exec-rule-finish"
         ~ts
         ~flow_ids:[ b.flow_id ]
-        ~args:(dune_args (rule_id_arg b.rule_id @ [ dur_ns_arg dur_ns ]))
+        ~args:(dune_args (rule_id_arg b.rule_id @ [ dur_ns_arg dur_ns ])))
   ;;
 
   (* The action span's start instant, also used on its own by the EOF flush
@@ -900,8 +926,9 @@ module Perfetto_conv = struct
   ;;
 
   (* Likewise for a build-dep span: collapsed to [build-dep-resolved] when the
-     dep is a source file, otherwise a [build-dep-start]/[build-dep-finish]
-     pair. [dep_outcome] is the end event's raw [Build_dep.outcome] sexp; as
+     dep is a source file resolved inside [collapse_threshold_ns], otherwise a
+     [build-dep-start]/[build-dep-finish] pair. [dep_outcome] is the end
+     event's raw [Build_dep.outcome] sexp; as
      with a rule's outcome, only the blob records what the dep resolved to
      (including the producing rule's id), so the instants use it only to pick
      the collapsed form. *)
@@ -912,7 +939,7 @@ module Perfetto_conv = struct
       | Sexp.List (Atom "is-source" :: _) -> true
       | _ -> false
     in
-    if is_source
+    if is_source && collapses dur_ns
     then
       push_instant
         t

@@ -52,8 +52,8 @@ crash-safe and streamable — except for one dune-side addition
    the UI and reconstructable in SQL without pairing joins (enables the
    debug-track recipe below).
 4. **Near-zero spans collapse to a single instant** (cache hits,
-   source-file deps) — the overwhelming majority of events in incremental
-   monorepo builds.
+   source-file deps, and only when the span took under 1ms) — the
+   overwhelming majority of events in incremental monorepo builds.
 5. **One flow per span chains its lifecycle**: for executed rules,
    `exec-rule-start` → `exec-rule-action-start` → `exec-rule-action-finish`
    → `exec-rule-finish` (a flow id's consecutive appearances link in
@@ -142,20 +142,23 @@ On track `exec-rule`:
 
 - `exec-rule-start`: `rule_id` (int).
 - `exec-rule-finish`: `rule_id`, `dur_ns`.
-- `exec-rule-resolved`: collapsed form used when the outcome is a cache hit;
-  placed at the begin timestamp; `rule_id`, `dur_ns`. Which outcome it was
-  is in `graph-rules`. Only cache hits collapse: a rule that failed or was
-  cancelled keeps the `exec-rule-start`/`-finish` pair, since it occupied
-  that span of time.
+- `exec-rule-resolved`: collapsed form used when the outcome is a cache hit
+  *and* the span took less than 1ms; placed at the begin timestamp;
+  `rule_id`, `dur_ns`. Which outcome it was is in `graph-rules`. A rule that
+  failed or was cancelled keeps the `exec-rule-start`/`-finish` pair, since it
+  occupied that span of time — and so does a cache hit that took 1ms or more
+  (a contended shared cache), whose interval is worth seeing.
 
 On track `build-dep`:
 
 - `build-dep-start`: `dep_id` (int) — the dep's intern id, resolved via
   `graph-dict`, and the key its `graph-deps` record starts with.
 - `build-dep-finish`: `dep_id`, `dur_ns`.
-- `build-dep-resolved`: collapsed form used when the dep is a source file;
-  `dep_id`, `dur_ns`. What the dep resolved to — producing rule, expansion
-  contents, or source — is in `graph-deps`.
+- `build-dep-resolved`: collapsed form used when the dep is a source file
+  *and* the span took less than 1ms; `dep_id`, `dur_ns`. What the dep resolved
+  to — producing rule, expansion contents, or source — is in `graph-deps`. A
+  source dep that took 1ms or more (a cold page cache) keeps the
+  `build-dep-start`/`-finish` pair.
 
 On track `exec-rule-action` (executed rules only):
 
@@ -772,6 +775,40 @@ Implementation notes / deviations:
   record is assembled, since the elements of an OCaml list expression are
   not evaluated left to right and the encoder's state makes that order
   observable.
+
+### Phase 9 — collapse gated on duration (converter-only) — **implemented**
+
+Motivation: phases 2 and 7 collapsed a span on its *outcome* alone — a cache
+hit, or an `is-source` dep. The outcome is a good proxy for "this took no
+time", but only a proxy: a shared-cache hit that round-trips to a contended
+remote store, or a source dep whose stat misses a cold page cache, occupies a
+real interval that the collapsed form throws away (a collapsed instant sits at
+the begin timestamp and carries no flow, so nothing in the UI shows the wait).
+
+Changes (dune-side events and `dune trace cat` are untouched):
+
+- Collapse requires the outcome *and* `dur_ns < 1ms`. A cache hit or source
+  dep at or above the threshold emits the ordinary `-start`/`-finish` pair,
+  with its flow, like any other span.
+- The threshold is overridable via `DUNE_TRACE_COLLAPSE_THRESHOLD_NS`
+  (mirroring `DUNE_TRACE_GRAPH_CHUNK_SIZE`); negative or unparseable values
+  fall back to the default. `0` collapses nothing, which is what lets the test
+  pin the behaviour instead of racing the clock.
+- Tests (`perfetto.t`): converting the cache-hit rebuild's trace with the
+  threshold at `0` yields no `-resolved` instants at all, the `exec-rule` and
+  `build-dep` pairs in their place, and flows on them.
+
+Implementation notes / deviations:
+
+- The threshold is a converter-side choice, not part of the blob or the event
+  schema, so `version` stays `1` and the plugin needs no change: it already
+  has to handle both forms of every collapsible span.
+- The existing collapse assertions in `perfetto.t` (a `build-dep-resolved` for
+  `/etc/hosts`, an `exec-rule-resolved` on the no-op rebuild) now depend on
+  those spans staying under 1ms on the test machine. Sub-millisecond is a wide
+  margin for a stat and a cache lookup, but if CI ever gets slow enough to
+  flake, the fix is to pin those cases with a large
+  `DUNE_TRACE_COLLAPSE_THRESHOLD_NS` rather than to drop the assertions.
 
 ## Verification checklist (carry across sessions)
 
