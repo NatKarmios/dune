@@ -12,8 +12,8 @@ folded into v1 rather than bumped onto a v2).
 
 The `graph` trace category records build-graph events (see
 `src/dune_engine/graph_trace.ml` and the `Graph` module in
-`src/dune_trace/event.ml`), and `dune trace perfetto` (`bin/trace.ml`,
-module `Perfetto_conv`) converts them to Perfetto protobuf. A Perfetto UI
+`src/dune_trace/event.ml`), and `dune trace perfetto`
+(`bin/trace_perfetto.ml`) converts them to Perfetto protobuf. A Perfetto UI
 plugin (separate codebase) consumes the result to integrate build-graph
 exploration with trace exploration; today it scrapes graph data out of
 slice debug annotations.
@@ -33,7 +33,7 @@ fan-in 50 (~100k dep edges):
 
 ## Design summary
 
-All changes are in the **converter** (`bin/trace.ml`). The on-disk csexp
+All changes are in the **converter** (`bin/trace_perfetto.ml`). The on-disk csexp
 format keeps its per-event begin/end pairs — that is what makes it
 crash-safe and streamable — except for one dune-side addition
 (`exec-rule-action`, phase 3). Decisions:
@@ -317,8 +317,8 @@ slice answers the headline number and the cone breakdown explains it.
 Emit the blob without removing anything, so the plugin keeps working on
 intermediate commits.
 
-- In `Perfetto_conv` (`bin/trace.ml`): accumulate, while streaming events,
-  (a) the intern table (already in `t.names`), (b) per-exec-rule-span
+- In the converter (`bin/trace_perfetto.ml`): accumulate, while streaming
+  events, (a) the intern table (already in `t.names`), (b) per-exec-rule-span
   records from begin args (dir/targets/forced_by, keyed by `async_id`
   until the end supplies deps/dyn_deps/outcome), (c) per-build-dep-span
   records likewise.
@@ -703,7 +703,7 @@ still carries the literal dep lists):
   `graph-rules`' seventh field becomes a `set_id`; the empty-vs-`?`
   distinction is unchanged, and each `<dyn_dep_stages>` stage becomes a
   `set_id` too, through the same table.
-- `Graph_blob.Dep_sets` in `bin/trace.ml` holds the encoder. It runs
+- `Graph_blob.Dep_sets` in `bin/trace_perfetto.ml` holds the encoder. It runs
   **online**, as each `exec-rule` end is handled (that order is the
   emission order the window below slides over), not as a post-pass: only
   the window, the pool, and the map from set to `set_id` persist. Sets are
