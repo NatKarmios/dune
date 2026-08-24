@@ -26,7 +26,7 @@ let dep_to_string (dep : Dep.t) =
 ;;
 
 module Forced_by = struct
-  type t' =
+  type t =
     | Forced_by_rule of Rule.Id.t
     | Forced_by_dep_recovery of Rule.Id.t
     | Forced_by_dep of Dep.t
@@ -36,9 +36,7 @@ module Forced_by = struct
     | Forced_by_configurator
     | Forced_by_request
 
-  type t = t'
-
-  let conv : t -> Graph.forced_by = function
+  let conv : t -> Graph.Forced_by.t = function
     | Forced_by_rule id -> Forced_by_rule (Rule.Id.to_int id)
     | Forced_by_dep_recovery id -> Forced_by_dep_recovery (Rule.Id.to_int id)
     | Forced_by_dep dep -> Forced_by_dep (dep_to_string dep)
@@ -66,6 +64,9 @@ module Forced_by = struct
 end
 
 module Build_dep = struct
+  module Outcome = Graph.Build_dep.Outcome
+  module Status = Graph.Build_dep.Status
+
   module Emit = struct
     let start ~async_id ~forced_by ~dep =
       Dune_trace.emit_all ~buffered:true Category.Graph
@@ -82,9 +83,7 @@ module Build_dep = struct
     ;;
   end
 
-  let expanded deps =
-    Graph.Build_dep.Dep_expanded (Dep.Set.to_list_map deps ~f:dep_to_string)
-  ;;
+  let expanded deps = Outcome.Dep_expanded (Dep.Set.to_list_map deps ~f:dep_to_string)
 
   (* Trace building a single [dep] as an async span: emit the begin (recording
      the current [forced_by]), then run [f] with [forced_by] set to
@@ -125,24 +124,24 @@ module Build_dep = struct
          (fun () ->
             let+ result = Forced_by.set ~new_forcer f report in
             emit_finish
-              (Option.value !resolved ~default:Graph.Build_dep.Dep_unknown)
-              Graph.Build_dep.Succeeded;
+              (Option.value !resolved ~default:Outcome.Dep_unknown)
+              Status.Succeeded;
             result)
          ~on_error:(fun exn ->
            let status =
              match Import.Scheduler.Run.caused_by_cancellation exn with
-             | true -> Graph.Build_dep.Cancelled
-             | false -> Graph.Build_dep.Failed
+             | true -> Status.Cancelled
+             | false -> Status.Failed
            in
            let* () =
              match !resolved, status with
              | Some outcome, _ ->
                emit_finish outcome status;
                Fiber.return ()
-             | None, Graph.Build_dep.Cancelled ->
-               emit_finish Graph.Build_dep.Dep_unknown status;
+             | None, Status.Cancelled ->
+               emit_finish Outcome.Dep_unknown status;
                Fiber.return ()
-             | None, (Graph.Build_dep.Succeeded | Graph.Build_dep.Failed) ->
+             | None, (Succeeded | Failed) ->
                let+ outcome = on_failure () in
                emit_finish outcome status
            in
@@ -154,7 +153,7 @@ module Build_dep = struct
   (* Nothing to fall back on: [file] and [file_selector] both know their
      resolution before the building that can fail, so a failure with none
      reported means there is none to report. *)
-  let unknown_on_failure () = Fiber.return Graph.Build_dep.Dep_unknown
+  let unknown_on_failure () = Fiber.return Outcome.Dep_unknown
 
   (* A file dep resolves to the rule that produces it, or to a source file when
      there is no such rule. *)
@@ -162,8 +161,8 @@ module Build_dep = struct
     start
       ~dep:(Dep.file path)
       ~outcome_of:(function
-        | None -> Graph.Build_dep.Dep_is_source
-        | Some (rule : Rule.t) -> Graph.Build_dep.Dep_rule (Rule.Id.to_int rule.id))
+        | None -> Outcome.Dep_is_source
+        | Some (rule : Rule.t) -> Dep_rule (Rule.Id.to_int rule.id))
       ~on_failure:unknown_on_failure
       f
   ;;
@@ -186,7 +185,7 @@ module Build_dep = struct
              Forced_by.set ~new_forcer:(Forced_by.dep ~dep) recover ()))
           ~f:(function
             | Ok deps -> expanded deps
-            | Error (_ : Exn_with_backtrace.t list) -> Graph.Build_dep.Dep_unknown))
+            | Error (_ : Exn_with_backtrace.t list) -> Outcome.Dep_unknown))
       f
   ;;
 
@@ -195,8 +194,7 @@ module Build_dep = struct
     start
       ~dep:(Dep.file_selector file_selector)
       ~outcome_of:(fun (files : Filename_set.t) ->
-        Graph.Build_dep.Dep_expanded
-          (Filename_set.to_list files |> List.map ~f:path_to_string))
+        Outcome.Dep_expanded (Filename_set.to_list files |> List.map ~f:path_to_string))
       ~on_failure:unknown_on_failure
       f
   ;;
@@ -208,10 +206,23 @@ module Exec_rule = struct
     | Local_cache_hit
     | Shared_cache_hit
 
-  let conv_outcome : outcome -> Graph.Exec_rule.outcome = function
+  let conv_outcome : outcome -> Graph.Exec_rule.Outcome.t = function
     | Executed -> Executed
     | Local_cache_hit -> Local_cache_hit
     | Shared_cache_hit -> Shared_cache_hit
+  ;;
+
+  (* [None] deps are the ones that could not be determined, as opposed to a
+     rule that genuinely has none. Dynamic deps are only ever resolved after
+     the static ones, so there are none to report in that case. *)
+  let conv_deps ~deps ~dyn_deps : Graph.Exec_rule.Deps.t =
+    match deps with
+    | None -> Unknown
+    | Some deps ->
+      Known
+        { static = Dep.Set.to_list_map ~f:dep_to_string deps
+        ; dynamic = List.map dyn_deps ~f:(Dep.Set.to_list_map ~f:dep_to_string)
+        }
   ;;
 
   (* Recover the dependencies of a rule that failed before resolving them.
@@ -259,19 +270,9 @@ module Exec_rule = struct
         ~start
     ;;
 
-    let finish
-          ~async_id
-          ~rule_id
-          ~(deps : Dep.Set.t)
-          ~deps_unknown
-          ~(dyn_deps : Dep.Set.t list)
-          outcome
-      =
+    let finish ~async_id ~rule_id ~(deps : Graph.Exec_rule.Deps.t) outcome =
       Dune_trace.emit_all ~buffered:true Category.Graph
-      @@ fun () ->
-      let deps = Dep.Set.to_list_map ~f:dep_to_string deps in
-      let dyn_deps = List.map dyn_deps ~f:(Dep.Set.to_list_map ~f:dep_to_string) in
-      Graph.Exec_rule.finish ~async_id ~rule_id ~deps ~deps_unknown ~dyn_deps ~outcome
+      @@ fun () -> Graph.Exec_rule.finish ~async_id ~rule_id ~deps ~outcome
     ;;
   end
 
@@ -317,13 +318,7 @@ module Exec_rule = struct
          if not !finished
          then (
            finished := true;
-           Emit.finish
-             ~async_id
-             ~rule_id
-             ~deps:(Option.value deps ~default:Dep.Set.empty)
-             ~deps_unknown:(Option.is_none deps)
-             ~dyn_deps
-             outcome)
+           Emit.finish ~async_id ~rule_id ~deps:(conv_deps ~deps ~dyn_deps) outcome)
        in
        (* The rule's deps, once [f] has resolved them. [None] until then, which
           is how a failure before that point is told from one after. *)

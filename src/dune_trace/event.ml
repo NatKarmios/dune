@@ -74,9 +74,6 @@ module Event = struct
        @ record_args args)
   ;;
 
-  (* Chrome nestable-async events, keyed by an integer [id] and a [phase]
-     ("begin"/"end"/"instant", rendered as ph b/e/n). Begin/end sharing an id
-     form a span; an instant attaches a marker to that span's track. *)
   let async_phase ?(args = []) ~async_id ~phase ~name ts cat : t =
     List
       (base ~name cat
@@ -100,8 +97,6 @@ end
 
 type async_id = int
 
-(* Fresh ids for the Chrome async events above. A single counter across all such
-   events keeps ids unique, so begin/end/instant events never mis-pair. *)
 let async_next_id = ref 0
 
 let gen_async_id () =
@@ -1039,77 +1034,62 @@ let runtime_counter time name value =
 ;;
 
 module Graph = struct
-  (* A single global intern table mapping a string (a target or a dependency,
-     both rendered to strings by [Dune_engine.Graph_trace]) to a small integer
-     id. The first time a string is seen it is assigned a fresh id; an [intern]
-     event records that [id -> value] mapping and thereafter events refer to it
-     by id alone. Ids are never reused, so the mapping stays valid for the
-     lifetime of the trace. *)
+  (* To reduce trace size, strings in Graph events are interned via an instant
+     event before use. *)
   module Intern = struct
     type t =
       { ids : int String.Table.t
       ; mutable next : int
       }
 
-    let create () = { ids = String.Table.create 1024; next = 0 }
+    let tbl = { ids = String.Table.create 1024; next = 0 }
 
-    (* Return the id for [key], and whether it was freshly allocated (in which
-       case the caller should emit an intern event). *)
-    let intern t key =
-      match String.Table.find t.ids key with
+    let get key =
+      match String.Table.find tbl.ids key with
       | Some id -> id, `Existing
       | None ->
-        let id = t.next in
-        t.next <- id + 1;
-        String.Table.set t.ids key id;
+        let id = tbl.next in
+        tbl.next <- id + 1;
+        String.Table.set tbl.ids key id;
         id, `New
     ;;
+
+    let mk_event ~ts entries =
+      let entries =
+        List.map entries ~f:(fun (id, value) ->
+          Arg.record [ "id", Arg.int id; "value", Arg.string value ] |> Arg.list)
+      in
+      Event.instant ~args:[ "entries", Arg.list entries ] ~name:"intern" ts Graph
+    ;;
+
+    let strings ~ts strings =
+      let new_entries = ref [] in
+      let ids =
+        List.map strings ~f:(fun s ->
+          let id, freshness = get s in
+          (match freshness with
+           | `New -> new_entries := (id, s) :: !new_entries
+           | `Existing -> ());
+          id)
+      in
+      let intern_events =
+        match List.rev !new_entries with
+        | [] -> []
+        | entries -> [ mk_event ~ts entries ]
+      in
+      intern_events, ids
+    ;;
+
+    let string ~ts s =
+      let id, freshness = get s in
+      let events =
+        match freshness with
+        | `New -> [ mk_event ~ts [ id, s ] ]
+        | `Existing -> []
+      in
+      events, id
+    ;;
   end
-
-  let intern = Intern.create ()
-
-  (* A private [intern] event recording the strings (targets or dependencies)
-     interned for the first time, each as an [id -> value] entry. Emitted ahead
-     of the event that first references the new ids. *)
-  let intern_event ~ts entries =
-    let entries =
-      List.map entries ~f:(fun (id, value) ->
-        Arg.record [ "id", Arg.int id; "value", Arg.string value ] |> Arg.list)
-    in
-    Event.instant ~args:[ "entries", Arg.list entries ] ~name:"intern" ts Graph
-  ;;
-
-  (* Intern all of [strings], returning the intern events for the ones not seen
-     before along with their ids (in the same order as [strings]). *)
-  let intern_strings ~ts strings =
-    let new_entries = ref [] in
-    let ids =
-      List.map strings ~f:(fun s ->
-        let id, freshness = Intern.intern intern s in
-        (match freshness with
-         | `New -> new_entries := (id, s) :: !new_entries
-         | `Existing -> ());
-        id)
-    in
-    let intern_events =
-      match List.rev !new_entries with
-      | [] -> []
-      | entries -> [ intern_event ~ts entries ]
-    in
-    intern_events, ids
-  ;;
-
-  (* Intern a single [s], returning its id and (for a value seen for the first
-     time) the intern event recording it. *)
-  let intern_string ~ts s =
-    let id, freshness = Intern.intern intern s in
-    let events =
-      match freshness with
-      | `New -> [ intern_event ~ts [ id, s ] ]
-      | `Existing -> []
-    in
-    events, id
-  ;;
 
   let ids_arg key ids =
     match ids with
@@ -1117,144 +1097,162 @@ module Graph = struct
     | _ :: _ -> [ key, Arg.list (List.map ids ~f:Arg.int) ]
   ;;
 
-  type forced_by =
-    | Forced_by_rule of int
-    | Forced_by_dep_recovery of int
-    | Forced_by_dep of string
-    | Forced_by_dynamic_includes of Path.Source.t
-    | Forced_by_gen_rules of Path.Build.t
-    | Forced_by_pform of Path.Source.t
-    | Forced_by_configurator
-    | Forced_by_request
+  module Forced_by = struct
+    type t =
+      | Forced_by_rule of int
+      | Forced_by_dep_recovery of int
+      | Forced_by_dep of string
+      | Forced_by_dynamic_includes of Path.Source.t
+      | Forced_by_gen_rules of Path.Build.t
+      | Forced_by_pform of Path.Source.t
+      | Forced_by_configurator
+      | Forced_by_request
 
-  (* The dep/path payloads of [forced_by] are interned like any other trace
-     path, so this returns the intern events (for values seen for the first
-     time) alongside the [forced_by] arg, whose payloads are the resulting ids.
-     [Forced_by_rule]'s and [Forced_by_dep_recovery]'s payloads are rule ids,
-     not paths, so they are left inline. *)
-  let forced_by_args ~ts = function
-    | None -> [], [ "forced_by", Arg.list [] ]
-    | Some forced_by ->
-      let tag, strings =
-        match forced_by with
-        | Forced_by_rule id -> `Rule id, []
-        | Forced_by_dep_recovery id -> `Dep_recovery id, []
-        | Forced_by_dep dep -> `Paths "dep", [ dep ]
-        | Forced_by_dynamic_includes path ->
-          `Paths "dynamic-includes", [ Path.Source.to_string path ]
-        | Forced_by_gen_rules dir -> `Paths "gen-rules", [ Path.Build.to_string dir ]
-        | Forced_by_pform dune_file -> `Paths "pform", [ Path.Source.to_string dune_file ]
-        | Forced_by_configurator -> `Paths "configurator", []
-        | Forced_by_request -> `Paths "request", []
-      in
-      let intern_events, ids = intern_strings ~ts strings in
-      let parts =
-        match tag with
-        | `Rule id -> [ Arg.string "rule"; Arg.int id ]
-        | `Dep_recovery id -> [ Arg.string "dep-recovery"; Arg.int id ]
-        | `Paths name -> Arg.string name :: List.map ids ~f:Arg.int
-      in
-      intern_events, [ "forced_by", Arg.list parts ]
-  ;;
+    let args ~ts = function
+      | None -> [], [ "forced_by", Arg.list [] ]
+      | Some forced_by ->
+        let tag, strings =
+          match forced_by with
+          | Forced_by_rule id -> `Rule id, []
+          | Forced_by_dep_recovery id -> `Dep_recovery id, []
+          | Forced_by_dep dep -> `Paths "dep", [ dep ]
+          | Forced_by_dynamic_includes path ->
+            `Paths "dynamic-includes", [ Path.Source.to_string path ]
+          | Forced_by_gen_rules dir -> `Paths "gen-rules", [ Path.Build.to_string dir ]
+          | Forced_by_pform dune_file ->
+            `Paths "pform", [ Path.Source.to_string dune_file ]
+          | Forced_by_configurator -> `Paths "configurator", []
+          | Forced_by_request -> `Paths "request", []
+        in
+        let intern_events, ids = Intern.strings ~ts strings in
+        let parts =
+          match tag with
+          | `Rule id -> [ Arg.string "rule"; Arg.int id ]
+          | `Dep_recovery id -> [ Arg.string "dep-recovery"; Arg.int id ]
+          | `Paths name -> Arg.string name :: List.map ids ~f:Arg.int
+        in
+        intern_events, [ "forced_by", Arg.list parts ]
+    ;;
+  end
 
   module Build_dep = struct
-    (* How building a dep resolved: it belonged to a [Dep_rule] (by id), it
-       [Dep_expanded] to concrete deps (e.g. an alias or glob), or it was a
-       source file ([Dep_is_source]). *)
-    type outcome =
-      | Dep_rule of int
-      | Dep_expanded of string list
-      | Dep_is_source
-      | Dep_unknown
+    module Outcome = struct
+      type t =
+        | Dep_rule of int
+        | Dep_expanded of string list
+        | Dep_is_source
+        | Dep_unknown
 
-    (* How building the dep itself ended. Orthogonal to [outcome]: a dep whose
-       resolution is known before the building starts reports it either way, so
-       without this a failed dep would be indistinguishable from a built one. *)
-    type status =
-      | Succeeded
-      | Failed
-      | Cancelled
+      let arg_interned ~ts = function
+        | Dep_rule rule_id -> Arg.list [ Arg.string "rule"; Arg.int rule_id ], []
+        | Dep_expanded expanded ->
+          let intern_events, expanded_ids = Intern.strings ~ts expanded in
+          let arg =
+            Arg.list (Arg.string "expanded" :: List.map expanded_ids ~f:Arg.int)
+          in
+          arg, intern_events
+        | Dep_is_source -> Arg.list [ Arg.string "is-source" ], []
+        | Dep_unknown -> Arg.list [ Arg.string "unknown" ], []
+      ;;
+    end
 
-    let status_to_string = function
-      | Succeeded -> "succeeded"
-      | Failed -> "failed"
-      | Cancelled -> "cancelled"
-    ;;
+    module Status = struct
+      type t =
+        | Succeeded
+        | Failed
+        | Cancelled
 
-    (* Async span for building a single dep, keyed by [async_id]: [start] emits
-       the begin (carrying the interned [dep]) and [finish] the matching end
-       (carrying the [outcome]). Deps are interned, so each returns its event
-       preceded by an [intern] event for deps seen for the first time; emit the
-       whole list (e.g. with [emit_all]). *)
+      let to_string = function
+        | Succeeded -> "succeeded"
+        | Failed -> "failed"
+        | Cancelled -> "cancelled"
+      ;;
+
+      let arg = function
+        | Succeeded -> []
+        | (Failed | Cancelled) as status ->
+          [ "dep_status", Arg.string (to_string status) ]
+      ;;
+    end
+
     let start ~async_id ~forced_by ~dep =
       let ts = Time.now () in
-      let intern_events, dep_id = intern_string ~ts dep in
+      let intern_events, dep_id = Intern.string ~ts dep in
       let dep_arg = [ "dep", Arg.int dep_id ] in
-      let forced_by_intern_events, forced_by_args = forced_by_args ~ts forced_by in
+      let forced_by_intern_events, forced_by_args = Forced_by.args ~ts forced_by in
       let args = dep_arg @ forced_by_args in
       intern_events
       @ forced_by_intern_events
       @ [ Event.async_begin ~args ~async_id ~name:"build-dep" ts Graph ]
     ;;
 
-    let finish ~async_id ~(outcome : outcome) ~(status : status) =
+    let finish ~async_id ~outcome ~status =
       let ts = Time.now () in
-      let expanded =
-        match outcome with
-        | Dep_expanded deps -> deps
-        | Dep_rule _ | Dep_is_source | Dep_unknown -> []
-      in
-      let intern_events, expanded_ids = intern_strings ~ts expanded in
-      let outcome_arg =
-        match outcome with
-        | Dep_rule rule_id -> Arg.list [ Arg.string "rule"; Arg.int rule_id ]
-        | Dep_expanded _ ->
-          Arg.list (Arg.string "expanded" :: List.map expanded_ids ~f:Arg.int)
-        | Dep_is_source -> Arg.list [ Arg.string "is-source" ]
-        | Dep_unknown -> Arg.list [ Arg.string "unknown" ]
-      in
-      (* Omitted for the common case, so that the numerous successful build-dep
-         spans do not each carry it. *)
-      let status_arg =
-        match status with
-        | Succeeded -> []
-        | Failed | Cancelled -> [ "dep_status", Arg.string (status_to_string status) ]
-      in
+      let outcome_arg, intern_events = Outcome.arg_interned ~ts outcome in
+      let status_arg = Status.arg status in
       let args = [ "dep_outcome", outcome_arg ] @ status_arg in
       intern_events @ [ Event.async_end ~args ~async_id ~name:"build-dep" ts Graph ]
     ;;
   end
 
   module Exec_rule = struct
-    (* How a rule's execution ended. The first three are successful outcomes;
-       the rest record a rule that never completed. [Dep_fail] is a failure
-       raised before the rule's dependencies were resolved and [Action_fail]
-       one raised after, while [Cancelled] means the build was torn down
-       around the rule (so it is not the rule's own failure). *)
-    type outcome =
-      | Executed
-      | Local_cache_hit
-      | Shared_cache_hit
-      | Dep_fail
-      | Action_fail
-      | Cancelled
+    module Outcome = struct
+      type t =
+        | Executed
+        | Local_cache_hit
+        | Shared_cache_hit
+        | Dep_fail
+        | Action_fail
+        | Cancelled
 
-    let outcome_to_string = function
-      | Executed -> "executed"
-      | Local_cache_hit -> "local-cache-hit"
-      | Shared_cache_hit -> "shared-cache-hit"
-      | Dep_fail -> "dep-fail"
-      | Action_fail -> "action-fail"
-      | Cancelled -> "cancelled"
-    ;;
+      let to_string = function
+        | Executed -> "executed"
+        | Local_cache_hit -> "local-cache-hit"
+        | Shared_cache_hit -> "shared-cache-hit"
+        | Dep_fail -> "dep-fail"
+        | Action_fail -> "action-fail"
+        | Cancelled -> "cancelled"
+      ;;
+    end
+
+    module Deps = struct
+      type t =
+        | Unknown
+        | Known of
+            { static : string list
+            ; dynamic : string list list
+            }
+
+      let args_interned ~ts = function
+        | Unknown -> [ "deps_unknown", Arg.bool true ], []
+        | Known { static; dynamic } ->
+          let static_intern_events, static_ids = Intern.strings ~ts static in
+          let static_arg = ids_arg "deps" static_ids in
+          let dyn_intern_events, dyn_ids =
+            dynamic |> List.map ~f:(Intern.strings ~ts) |> List.split
+          in
+          let dyn_intern_events = List.concat dyn_intern_events in
+          let dyn_arg =
+            match dyn_ids with
+            | [] -> []
+            | _ ->
+              [ ( "dyn_deps"
+                , Arg.list
+                    (List.map dyn_ids ~f:(fun ids -> Arg.list (List.map ids ~f:Arg.int)))
+                )
+              ]
+          in
+          static_arg @ dyn_arg, static_intern_events @ dyn_intern_events
+      ;;
+    end
 
     let start ~async_id ~rule_id ~dir ~target_files ~target_dirs ~forced_by ~start =
-      let dir_intern_events, dir_id = intern_string ~ts:start dir in
-      let file_intern_events, file_ids = intern_strings ~ts:start target_files in
+      let dir_intern_events, dir_id = Intern.string ~ts:start dir in
+      let file_intern_events, file_ids = Intern.strings ~ts:start target_files in
       let dir_target_intern_events, dir_target_ids =
-        intern_strings ~ts:start target_dirs
+        Intern.strings ~ts:start target_dirs
       in
-      let forced_by_intern_events, forced_by_args = forced_by_args ~ts:start forced_by in
+      let forced_by_intern_events, forced_by_args = Forced_by.args ~ts:start forced_by in
       let args =
         (("rule_id", Arg.int rule_id) :: forced_by_args)
         @ [ "dir", Arg.int dir_id ]
@@ -1268,55 +1266,20 @@ module Graph = struct
       @ [ Event.async_begin ~args ~async_id ~name:"exec-rule" start Graph ]
     ;;
 
-    (* The matching end. It carries the resolved [deps] and the dynamic deps
-       ([dyn_deps], one dep list per dynamic-deps stage) alongside the outcome,
-       all interned; it returns the end event preceded by an [intern] event for
-       any deps seen for the first time, so emit the whole list (e.g. with
-       [emit_all]). *)
-    let finish ~async_id ~rule_id ~deps ~deps_unknown ~dyn_deps ~outcome =
+    let finish ~async_id ~rule_id ~deps ~outcome =
       let ts = Time.now () in
-      let dep_intern_events, dep_ids = intern_strings ~ts deps in
-      let per_stage = List.map dyn_deps ~f:(intern_strings ~ts) in
-      let dyn_intern_events = List.concat_map per_stage ~f:fst in
-      let dyn_dep_ids = List.map per_stage ~f:snd in
-      let dyn_deps_arg =
-        match dyn_dep_ids with
-        | [] -> []
-        | _ ->
-          [ ( "dyn_deps"
-            , Arg.list
-                (List.map dyn_dep_ids ~f:(fun ids -> Arg.list (List.map ids ~f:Arg.int)))
-            )
-          ]
-      in
-      (* [deps] is empty both for a rule with no dependencies and for one whose
-         dependencies could not be determined, and [ids_arg] omits an empty
-         list, so the two are otherwise indistinguishable on the wire. *)
-      let deps_unknown_arg =
-        match deps_unknown with
-        | false -> []
-        | true -> [ "deps_unknown", Arg.bool true ]
-      in
+      let dep_args, dep_intern_events = Deps.args_interned ~ts deps in
       let args =
         [ "rule_id", Arg.int rule_id
-        ; "rule_outcome", Arg.string (outcome_to_string outcome)
+        ; "rule_outcome", Arg.string (Outcome.to_string outcome)
         ]
-        @ ids_arg "deps" dep_ids
-        @ deps_unknown_arg
-        @ dyn_deps_arg
+        @ dep_args
       in
-      dep_intern_events
-      @ dyn_intern_events
-      @ [ Event.async_end ~args ~async_id ~name:"exec-rule" ts Graph ]
+      dep_intern_events @ [ Event.async_end ~args ~async_id ~name:"exec-rule" ts Graph ]
     ;;
   end
 
   module Exec_rule_action = struct
-    (* Span for the execution of a rule's action proper (Step IV in
-       [Dune_engine.Build_system]) -- real work, bounded by [-j]. It shares
-       its rule's "exec-rule" [async_id], so the begin/end pair nests inside
-       the rule's span; the two spans are told apart by their name. Cache
-       hits execute no action, so no span is emitted for them. *)
     let start ~async_id ~rule_id ~start =
       Event.async_begin
         ~args:[ "rule_id", Arg.int rule_id ]
@@ -1347,9 +1310,6 @@ module Graph = struct
   end
 
   module Gen_rules = struct
-    (* Span for generating a directory's rules, carrying the build [dir] and,
-       once known (a standalone/group-root directory), the source [dune_file]
-       that drives it. *)
     let start ~async_id ~dir ~start =
       Event.async_begin
         ~args:[ "dir", Arg.build_path dir ]

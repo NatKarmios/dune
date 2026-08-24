@@ -42,8 +42,6 @@ module Event : sig
   type t
   type async_id
 
-  (** A fresh id for Chrome async events, unique across all such events so that
-      begin/end/instant events pair up correctly. *)
   val gen_async_id : unit -> async_id
 
   val sandbox
@@ -288,101 +286,82 @@ module Event : sig
   val artifact_substitution : file:Path.t -> placeholder:Dyn.t -> value:string -> t
 
   module Graph : sig
-    (* Targets and dependencies are rendered to strings by
-       [Dune_engine.Graph_trace] and interned together in a single table, so all
-       the [string]s and [string list]s below are values to be interned. *)
-    type forced_by =
-      | Forced_by_rule of int
-      | Forced_by_dep_recovery of int
-      | Forced_by_dep of string
-      | Forced_by_dynamic_includes of Path.Source.t
-      | Forced_by_gen_rules of Path.Build.t
-      | Forced_by_pform of Path.Source.t
-      | Forced_by_configurator
-      | Forced_by_request
+    module Forced_by : sig
+      type t =
+        | Forced_by_rule of int
+        | Forced_by_dep_recovery of int
+        | Forced_by_dep of string
+        | Forced_by_dynamic_includes of Path.Source.t
+        | Forced_by_gen_rules of Path.Build.t
+        | Forced_by_pform of Path.Source.t
+        | Forced_by_configurator
+        | Forced_by_request
+    end
 
     module Build_dep : sig
-      (** How building a dep resolved: it belonged to a [Dep_rule] (by id), it
-          [Dep_expanded] to concrete deps (e.g. an alias or glob), or it was a
-          source file ([Dep_is_source]). [Dep_unknown] records a dep whose
-          resolution dune could not determine, because building it failed or was
-          cancelled first. *)
-      type outcome =
-        | Dep_rule of int
-        | Dep_expanded of string list
-        | Dep_is_source
-        | Dep_unknown
+      module Outcome : sig
+        type t =
+          | Dep_rule of int
+          | Dep_expanded of string list
+          | Dep_is_source
+          | Dep_unknown
+      end
 
-      (** How building the dep itself ended. Orthogonal to [outcome]: a dep whose
-          resolution is known before the building starts reports it either way,
-          so without this a failed dep would look like a built one. *)
-      type status =
-        | Succeeded
-        | Failed
-        | Cancelled
+      module Status : sig
+        type t =
+          | Succeeded
+          | Failed
+          | Cancelled
+      end
 
-      (** An async "build-dep" span for building a single dep, keyed by
-          [async_id]: [start] emits the begin (carrying [dep]) and [finish] the
-          matching end (carrying the [outcome]). Deps are interned, so each
-          returns its event preceded by an [intern] event for deps seen for the
-          first time; emit the whole list (e.g. with [emit_all]). *)
-      val start : async_id:async_id -> forced_by:forced_by option -> dep:string -> t list
+      val start
+        :  async_id:async_id
+        -> forced_by:Forced_by.t option
+        -> dep:string
+        -> t list
 
-      val finish : async_id:async_id -> outcome:outcome -> status:status -> t list
+      val finish : async_id:async_id -> outcome:Outcome.t -> status:Status.t -> t list
     end
 
     module Exec_rule : sig
-      (* How a rule's execution ended. The first three are successful outcomes;
-         the rest record a rule that never completed. [Dep_fail] is a failure
-         raised before the rule's dependencies were resolved and [Action_fail]
-         one raised after, while [Cancelled] means the build was torn down
-         around the rule (so it is not the rule's own failure). *)
-      type outcome =
-        | Executed
-        | Local_cache_hit
-        | Shared_cache_hit
-        | Dep_fail
-        | Action_fail
-        | Cancelled
+      module Outcome : sig
+        type t =
+          | Executed
+          | Local_cache_hit
+          | Shared_cache_hit
+          | Dep_fail
+          | Action_fail
+          | Cancelled
+      end
 
-      (* The events are Chrome nestable-async events keyed by [async_id]:
-         [start] emits a begin and [finish] the matching end. Both also carry
-         [rule_id] (the rule's own identity, distinct from the async chain's
-         id). [start] additionally carries the targets' [dir] and the bare
-         names of the target [files] and [dirs] within it. [finish]
-         additionally carries the resolved [deps] and the dynamic dependencies
-         [dyn_deps] (one dep list per dynamic-deps stage). Both [start] and
-         [finish] intern targets/deps and so return their event preceded by an
-         [intern] event for ids seen for the first time; emit the whole list
-         (e.g. with [emit_all]) so ids are declared before referenced. *)
+      module Deps : sig
+        type t =
+          | Unknown
+          | Known of
+              { static : string list
+              ; dynamic : string list list
+              }
+      end
+
       val start
         :  async_id:async_id
         -> rule_id:int
         -> dir:string
         -> target_files:string list
         -> target_dirs:string list
-        -> forced_by:forced_by option
+        -> forced_by:Forced_by.t option
         -> start:Time.t
         -> t list
 
-      (** [deps_unknown] marks a rule whose dependencies could not be
-          determined, telling that apart from a rule that genuinely has none:
-          [deps] is empty either way. *)
       val finish
         :  async_id:async_id
         -> rule_id:int
-        -> deps:string list
-        -> deps_unknown:bool
-        -> dyn_deps:string list list
-        -> outcome:outcome
+        -> deps:Deps.t
+        -> outcome:Outcome.t
         -> t list
     end
 
     module Exec_rule_action : sig
-      (* Span for the execution of a rule's action proper (real work, bounded
-         by [-j]). It shares its rule's "exec-rule" [async_id] so the pair
-         nests inside the rule's span; both also carry [rule_id]. Only
-         executed rules have one -- cache hits execute no action. *)
       val start : async_id:async_id -> rule_id:int -> start:Time.t -> t
       val finish : async_id:async_id -> t
     end
