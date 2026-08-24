@@ -6,8 +6,7 @@ let path_to_string (path : Path.t) =
   path |> Path.Expert.try_localize_external |> Path.to_string
 ;;
 
-(* Render a dependency to a readable string for the trace: a file to its path,
-   an alias to [dir@name], a file selector (glob) to [dir/<pattern>]. *)
+(* Render a dependency for the trace. *)
 let dep_to_string (dep : Dep.t) =
   match dep with
   | Env var -> sprintf "env:%s" var
@@ -26,36 +25,16 @@ let dep_to_string (dep : Dep.t) =
 ;;
 
 module Forced_by = struct
-  type t =
-    | Forced_by_rule of Rule.Id.t
-    | Forced_by_dep_recovery of Rule.Id.t
-    | Forced_by_dep of Dep.t
-    | Forced_by_dynamic_includes of Path.Source.t
-    | Forced_by_gen_rules of Path.Build.t
-    | Forced_by_pform of Path.Source.t
-    | Forced_by_configurator
-    | Forced_by_request
+  include Graph.Forced_by
 
-  let conv : t -> Graph.Forced_by.t = function
-    | Forced_by_rule id -> Forced_by_rule (Rule.Id.to_int id)
-    | Forced_by_dep_recovery id -> Forced_by_dep_recovery (Rule.Id.to_int id)
-    | Forced_by_dep dep -> Forced_by_dep (dep_to_string dep)
-    | Forced_by_dynamic_includes path -> Forced_by_dynamic_includes path
-    | Forced_by_gen_rules dir -> Forced_by_gen_rules dir
-    | Forced_by_pform dune_file -> Forced_by_pform dune_file
-    | Forced_by_configurator -> Forced_by_configurator
-    | Forced_by_request -> Forced_by_request
-  ;;
-
-  (* The forcer of the current dynamic context. Each scope sets it while running
-   its body; [Exec_rule] reads it and records the forcer on the rule's events so
-   the trace shows what forced each rule. *)
+  (* The forcer of the current dynamic context: each scope sets it while
+     running its body, and the span events record it. *)
   let var = Fiber.Var.create (None : t option)
   let set ~new_forcer f x = Fiber.Var.set var (Some new_forcer) (fun () -> Memo.run (f x))
   let get = Fiber.Var.get var
-  let rule ~rule:{ Rule.id; _ } = Forced_by_rule id
-  let dep_recovery ~rule:{ Rule.id; _ } = Forced_by_dep_recovery id
-  let dep ~dep = Forced_by_dep dep
+  let rule ~rule:{ Rule.id; _ } = Forced_by_rule (Rule.Id.to_int id)
+  let dep_recovery ~rule:{ Rule.id; _ } = Forced_by_dep_recovery (Rule.Id.to_int id)
+  let dep ~dep = Forced_by_dep (dep_to_string dep)
   let dynamic_includes ~dune_file = Forced_by_dynamic_includes dune_file
   let gen_rules ~dir = Forced_by_gen_rules dir
   let pform ~dune_file = Forced_by_pform dune_file
@@ -70,11 +49,7 @@ module Build_dep = struct
   module Emit = struct
     let start ~async_id ~forced_by ~dep =
       Dune_trace.emit_all ~buffered:true Category.Graph
-      @@ fun () ->
-      Graph.Build_dep.start
-        ~async_id
-        ~forced_by:(Option.map forced_by ~f:Forced_by.conv)
-        ~dep:(dep_to_string dep)
+      @@ fun () -> Graph.Build_dep.start ~async_id ~forced_by ~dep:(dep_to_string dep)
     ;;
 
     let finish ~async_id outcome status =
@@ -85,19 +60,10 @@ module Build_dep = struct
 
   let expanded deps = Outcome.Dep_expanded (Dep.Set.to_list_map deps ~f:dep_to_string)
 
-  (* Trace building a single [dep] as an async span: emit the begin (recording
-     the current [forced_by]), then run [f] with [forced_by] set to
-     [Forced_by_dep dep] and a [report] callback taking whatever [outcome_of]
-     turns into the dep's resolution. The end is emitted once [f] settles, so
-     the span covers the building, not just the point the resolution was known.
-
-     [f] reports the resolution as soon as it knows it, which is before the
-     building that can fail, so a dep that fails to build still records what it
-     resolved to (told apart from one that built by the span's status). If [f]
-     raises without having reported one, the end carries the outcome
-     [on_failure] can produce, and [Dep_unknown] when it can produce none. A
-     cancellation goes straight to [Dep_unknown] -- the build is being torn down,
-     so no work is spent determining a resolution. *)
+  (* Trace building [dep] as an async span: [f] runs with [forced_by] set to
+     this dep and a [report] callback for its resolution, and the span ends
+     once [f] settles. If [f] raises without having reported, [on_failure]
+     supplies the outcome; a cancellation goes straight to [Dep_unknown]. *)
   let start ~(dep : Dep.t) ~outcome_of ~on_failure (f : ('b -> unit) -> 'a Memo.t)
     : 'a Memo.t
     =
@@ -109,8 +75,7 @@ module Build_dep = struct
       (let* forced_by = Forced_by.get in
        Emit.start ~async_id ~forced_by ~dep;
        (* [report] only records the resolution; the span still ends when the
-          building does, so its duration covers the whole of it. A span has at
-          most one end. *)
+          building does. A span has at most one end. *)
        let resolved = ref None in
        let report x = resolved := Some (outcome_of x) in
        let finished = ref false in
@@ -150,13 +115,10 @@ module Build_dep = struct
     else f ignore
   ;;
 
-  (* Nothing to fall back on: [file] and [file_selector] both know their
-     resolution before the building that can fail, so a failure with none
-     reported means there is none to report. *)
+  (* [file] and [file_selector] know their resolution before anything can
+     fail, so a failure with none reported means there is none. *)
   let unknown_on_failure () = Fiber.return Outcome.Dep_unknown
 
-  (* A file dep resolves to the rule that produces it, or to a source file when
-     there is no such rule. *)
   let file (path : Path.t) f =
     start
       ~dep:(Dep.file path)
@@ -167,12 +129,8 @@ module Build_dep = struct
       f
   ;;
 
-  (* An alias expands to its deps. Unlike a file or a glob, that expansion is a
-     product of the very work that can fail, so there is nothing to report up
-     front: [recover] re-walks the alias's definitions without building them,
-     which yields the same deps the facts would have been keyed by. Errors it
-     raises are dropped -- recovering a resolution must not displace the failure
-     being reported -- leaving [Dep_unknown]. *)
+  (* Errors from [recover] are dropped: recovering a resolution must not
+     displace the failure being reported. *)
   let alias (alias : Alias.t) ~recover f =
     let dep = Dep.alias alias in
     start
@@ -189,7 +147,6 @@ module Build_dep = struct
       f
   ;;
 
-  (* A file selector (glob) expands to the files it matched. *)
   let file_selector (file_selector : File_selector.t) f =
     start
       ~dep:(Dep.file_selector file_selector)
@@ -212,9 +169,8 @@ module Exec_rule = struct
     | Shared_cache_hit -> Shared_cache_hit
   ;;
 
-  (* [None] deps are the ones that could not be determined, as opposed to a
-     rule that genuinely has none. Dynamic deps are only ever resolved after
-     the static ones, so there are none to report in that case. *)
+  (* [None] deps could not be determined, as opposed to a rule that genuinely
+     has none -- in which case there are no dynamic deps either. *)
   let conv_deps ~deps ~dyn_deps : Graph.Exec_rule.Deps.t =
     match deps with
     | None -> Unknown
@@ -225,20 +181,12 @@ module Exec_rule = struct
         }
   ;;
 
-  (* Recover the dependencies of a rule that failed before resolving them.
-     [Lazy] evaluation reports the same set as the [Eager] evaluation that
-     failed -- for every [Action_builder.t] constructor, the keys of the [Eager]
-     facts are exactly the [Lazy] dep set -- but reaches it without building
-     anything, so it does not re-enter the failure, which lives behind the [f]
-     that [Eager] passes to [Dep.Facts.record_facts]. Errors raised here are
-     dropped: recovering the deps must not displace the failure being
-     reported.
-
-     [Lazy] evaluation does not build deps, but it does run the rule's
-     [Of_memo] nodes, which can force a build of their own (a [%{read:...}]
-     pform, say). Those run under a [dep_recovery] forcer so that they are
-     attributed to recovering this rule rather than to whatever forced the
-     rule, which is no longer what is running. *)
+  (* Recover the deps of a rule that failed before resolving them: [Lazy]
+     evaluation yields the same set as the [Eager] evaluation that failed,
+     without building anything, so it does not re-enter the failure. Errors are
+     dropped -- recovery must not displace the failure being reported. It does
+     run the rule's [Of_memo] nodes, which can force builds of their own, hence
+     the [dep_recovery] forcer. *)
   let recover_deps (rule : Rule.t) =
     Fiber.map
       (Fiber.collect_errors (fun () ->
@@ -266,7 +214,7 @@ module Exec_rule = struct
         ~dir:(Path.Build.to_string root)
         ~target_files:(Filename.Set.to_list files |> Filename.L.to_string)
         ~target_dirs:(Filename.Set.to_list dirs |> Filename.L.to_string)
-        ~forced_by:(Option.map forced_by ~f:Forced_by.conv)
+        ~forced_by
         ~start
     ;;
 
@@ -276,22 +224,10 @@ module Exec_rule = struct
     ;;
   end
 
-  (* [f] reports the rule's deps to [deps_resolved] as soon as it has them, and
-     calls [finish] once the execution has produced an [outcome], to emit the
-     matching "exec-rule" end. It is also handed a [trace_action] wrapper that
-     emits an "exec-rule-action" begin/end pair around the action's execution
-     fiber; the pair shares the rule's [async_id], so it nests inside the
-     rule's span. [Build_system] applies it to the action execution proper
-     (Step IV, after both cache lookups), so the span exists only for executed
-     rules.
-
-     If [f] raises, the end is emitted here instead, so that a rule which never
-     completes still lands in the trace with its deps rather than leaving a span
-     that never ends. Which failure it was follows from how far [f] got:
+  (* Which failure a raising [f] is reported as follows from how far it got:
      [Dep_fail] before it resolved the deps and [Action_fail] after. A
-     cancellation is not the rule's own failure -- the build is being torn down
-     around it -- so it is reported as [Cancelled], with no deps and no work
-     spent recovering them. *)
+     cancellation is not the rule's own failure, so it is [Cancelled], with no
+     deps and no work spent recovering them. *)
   let start
         ~(rule : Rule.t)
         (f :
@@ -310,9 +246,8 @@ module Exec_rule = struct
       (let* forced_by = Forced_by.get in
        let start = Time.now () in
        Emit.start ~rule ~async_id ~forced_by ~start;
-       (* A span has at most one end. [emit_finish] is reached both by [f]
-          completing and by the error handler below, which runs once per error
-          raised under the rule, so only the first call emits. *)
+       (* A span has at most one end, and the error handler below runs once
+          per error raised under the rule, so only the first call emits. *)
        let finished = ref false in
        let emit_finish ~deps ~dyn_deps outcome =
          if not !finished
@@ -320,8 +255,8 @@ module Exec_rule = struct
            finished := true;
            Emit.finish ~async_id ~rule_id ~deps:(conv_deps ~deps ~dyn_deps) outcome)
        in
-       (* The rule's deps, once [f] has resolved them. [None] until then, which
-          is how a failure before that point is told from one after. *)
+       (* [None] until [f] resolves the deps, which is how a failure before
+          that point is told from one after. *)
        let resolved = ref None in
        let deps_resolved facts = resolved := Some (Dep.Set.of_keys facts) in
        let finish ~dyn_deps outcome =
@@ -366,10 +301,6 @@ module Exec_rule = struct
 end
 
 module Dynamic_includes = struct
-  (* Wraps the reading and processing of the dune file at [path]. Emits a
-     [dynamic-includes] begin/end pair around [f] and sets [forced_by] to
-     [Forced_by_dynamic_includes path] so that work done while processing the
-     file is attributed to the load. *)
   let start ~(dune_file : Path.Source.t) (f : unit -> 'a Memo.t) : 'a Memo.t =
     if enabled Category.Graph
     then (
@@ -389,11 +320,6 @@ module Dynamic_includes = struct
 end
 
 module Gen_rules = struct
-  (* Wraps the generation of rules for [dir]. Emits a [gen-rules] begin/end pair
-     around [f] and sets [forced_by] to [Forced_by_rule_gen { dir }] so that
-     builds forced while generating the directory's rules are attributed to it.
-     [f] is handed a callback to report the source [dune_file] driving the
-     directory (for a standalone/group root); it is carried on the end event. *)
   let start ~(dir : Path.Build.t) (f : (Path.Source.t -> unit) -> 'a Memo.t) : 'a Memo.t =
     if enabled Category.Graph
     then (
@@ -415,11 +341,7 @@ module Gen_rules = struct
 end
 
 module Pform = struct
-  (* Sets [forced_by] to [Forced_by_pform dune_file] while [f] runs, so a build
-     forced by expanding a pform in [dune_file]'s stanzas (e.g. [%{read:...}] in
-     an [enabled_if], evaluated at rule-generation time) is attributed to that
-     dune file. Unlike the other wrappers this emits no span event: pform
-     expansions are far too numerous for one span each. *)
+  (* No span event: pform expansions are far too numerous for one span each. *)
   let expand ~(dir : Path.Build.t) ~(fname : Import.Filename.t) (f : unit -> 'a Memo.t)
     : 'a Memo.t
     =
@@ -436,8 +358,6 @@ module Pform = struct
 end
 
 module Configurator = struct
-  (* Sets [forced_by] to [Forced_by_configurator] while [f] runs, attributing the
-     eager build of the per-context configurator files to it. No span event. *)
   let force (f : unit -> 'a Memo.t) : 'a Memo.t =
     if enabled Category.Graph
     then
@@ -447,9 +367,6 @@ module Configurator = struct
 end
 
 module Request = struct
-  (* Sets [forced_by] to [Forced_by_request] while [f] runs — the top-level build
-     of a requested goal — so the requested targets themselves (first forced
-     here) are attributed to the request rather than to nothing. No span event. *)
   let build (f : unit -> 'a Memo.t) : 'a Memo.t =
     if enabled Category.Graph
     then Forced_by.set ~new_forcer:Forced_by.request f () |> Memo.of_reproducible_fiber
