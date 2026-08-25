@@ -282,14 +282,11 @@ module Glob = struct
   let to_dyn t = to_dyn Element.to_dyn t
   let test (t : t) ~standard elem = test t ~standard ~test:Element.test elem
 
-  (* Rendered in the predicate language's own syntax, so the string reads back
-     the way it was written in the dune file. [True] is every file name, i.e.
-     [*]; [False] is the empty disjunction. *)
   let rec to_string (t : t) =
     match t with
     | Element e -> Element.to_string e
     | True -> "*"
-    | False -> "(or)"
+    | False -> "(and)"
     | Standard -> ":standard"
     | Not t -> sprintf "(not %s)" (to_string t)
     | Or ts -> parens "or" ts
