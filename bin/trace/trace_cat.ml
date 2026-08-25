@@ -1,11 +1,12 @@
 open Import
+module Event_sexp = Trace_common.Event_sexp
 
 let pid = lazy (Unix.getpid ())
 
 let json_of_event ~chrome (sexp : Sexp.t) =
-  let cat, name, ts, rest, _ = Trace_common.Event_sexp.to_base_args sexp in
-  let ts, dur = Trace_common.Event_sexp.to_times ts in
-  let async_phase, async_id, rest = Trace_common.Event_sexp.to_async_args rest in
+  let cat, name, ts, rest, _ = Event_sexp.to_base_args sexp in
+  let ts, dur = Event_sexp.to_times ts in
+  let async_phase, async_id, rest = Event_sexp.to_async_args rest in
   let rest =
     List.map rest ~f:(function
       | Sexp.List [ Atom ("process_args" as k); List v ] ->
@@ -13,9 +14,9 @@ let json_of_event ~chrome (sexp : Sexp.t) =
         , Json.list
             (List.map v ~f:(function
                | Sexp.Atom s -> Json.string s
-               | _ -> Trace_common.Event_sexp.invalid sexp)) )
-      | Sexp.List [ Atom k; v ] -> k, Trace_common.Event_sexp.to_json v
-      | _ -> Trace_common.Event_sexp.invalid sexp)
+               | _ -> Event_sexp.invalid sexp)) )
+      | Sexp.List [ Atom k; v ] -> k, Event_sexp.to_json v
+      | _ -> Event_sexp.invalid sexp)
   in
   let base =
     [ "cat", Json.string cat
@@ -119,8 +120,8 @@ let term =
     if follow then flush stdout
   in
   if follow
-  then Trace_common.Event_sexp.iter_follow trace_file ~f:print_with_flush
-  else Trace_common.Event_sexp.iter trace_file ~f:print;
+  then Event_sexp.iter_follow trace_file ~f:print_with_flush
+  else Event_sexp.iter trace_file ~f:print;
   match mode with
   | `Chrome -> print_endline "]"
   | `Json | `Sexp -> ()
