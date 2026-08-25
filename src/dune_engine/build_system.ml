@@ -890,48 +890,45 @@ module Internal = struct
           ~human_readable_description:(fun () ->
             Pp.text (Path.to_string_maybe_quoted (Path.build path)))
       in
-      let+ result =
-        match Targets.Produced.find_any targets path with
-        | Some (Left digest) -> Memo.return (digest, File_target)
-        | Some (Right contents) ->
-          let digest = directory_digest contents in
-          Memo.return (digest, Dir_target { targets })
-        | None ->
-          (* CR-someday amokhov: The most important reason we end up here is
+      (match Targets.Produced.find_any targets path with
+       | Some (Left digest) -> Memo.return (digest, File_target)
+       | Some (Right contents) ->
+         let digest = directory_digest contents in
+         Memo.return (digest, Dir_target { targets })
+       | None ->
+         (* CR-someday amokhov: The most important reason we end up here is
           [No_such_file]. I think some of the outcomes above are impossible
           but some others will benefit from a better error. To be refined. *)
-          let target =
-            Path.Build.drop_build_context_exn path |> Path.Source.to_string_maybe_quoted
-          in
-          let matching_dirs =
-            Filename.Set.to_list_map rule.targets.dirs ~f:(fun dir ->
-              (* CR-someday rleshchinskiy: This test can probably be simplified. *)
-              let dir = Path.Build.relative_fname rule.targets.root dir in
-              match Path.Build.is_descendant path ~of_:dir with
-              | true -> [ dir ]
-              | false -> [])
-            |> List.concat
-          in
-          let matching_target =
-            match matching_dirs with
-            | [ dir ] ->
-              Path.Build.drop_build_context_exn dir |> Path.Source.to_string_maybe_quoted
-            | [] | _ :: _ ->
-              Code_error.raise
-                "Multiple matching directory targets"
-                [ "targets", Targets.Validated.to_dyn rule.targets ]
-          in
-          User_error.raise
-            ~loc:rule.loc
-            ~needs_stack_trace:true
-            [ Pp.textf
-                "This rule defines a directory target %S that matches the requested path \
-                 %S but the rule's action didn't produce it"
-                matching_target
-                target
-            ]
-      in
-      result
+         let target =
+           Path.Build.drop_build_context_exn path |> Path.Source.to_string_maybe_quoted
+         in
+         let matching_dirs =
+           Filename.Set.to_list_map rule.targets.dirs ~f:(fun dir ->
+             (* CR-someday rleshchinskiy: This test can probably be simplified. *)
+             let dir = Path.Build.relative_fname rule.targets.root dir in
+             match Path.Build.is_descendant path ~of_:dir with
+             | true -> [ dir ]
+             | false -> [])
+           |> List.concat
+         in
+         let matching_target =
+           match matching_dirs with
+           | [ dir ] ->
+             Path.Build.drop_build_context_exn dir |> Path.Source.to_string_maybe_quoted
+           | [] | _ :: _ ->
+             Code_error.raise
+               "Multiple matching directory targets"
+               [ "targets", Targets.Validated.to_dyn rule.targets ]
+         in
+         User_error.raise
+           ~loc:rule.loc
+           ~needs_stack_trace:true
+           [ Pp.textf
+               "This rule defines a directory target %S that matches the requested path \
+                %S but the rule's action didn't produce it"
+               matching_target
+               target
+           ])
 
   and execute_anonymous_action action =
     let* action, facts = Action_builder.evaluate_and_collect_facts action in
@@ -947,15 +944,15 @@ module Internal = struct
     | Deps x -> x
     | Action x -> dep_on_anonymous_action x
 
+  and collect_alias_deps alias =
+    Load_rules.get_alias_definition alias
+    >>= Memo.parallel_map ~f:(fun (_loc, definition) ->
+      Action_builder.evaluate_and_collect_deps (dep_on_alias_definition definition)
+      >>| snd)
+    >>| Dep.Set.union_all
+
   and build_alias_impl alias =
-    Graph_trace.Build_dep.alias alias ~recover:(fun () ->
-      (* The same walk as below, but collecting deps rather than facts, so it
-           reaches the alias's expansion without building it. *)
-      Load_rules.get_alias_definition alias
-      >>= Memo.parallel_map ~f:(fun (_loc, definition) ->
-        Action_builder.evaluate_and_collect_deps (dep_on_alias_definition definition)
-        >>| snd)
-      >>| Dep.Set.union_all)
+    Graph_trace.Build_dep.alias alias ~recover:(fun () -> collect_alias_deps alias)
     @@ fun trace_resolved ->
     let+ l =
       Load_rules.get_alias_definition alias
