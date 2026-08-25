@@ -62,9 +62,6 @@ module T = struct
     | Universe, Universe -> Ordering.Eq
   ;;
 
-  let equal x y = compare x y = Ordering.Eq
-  let hash = Stdlib.Hashtbl.hash
-
   let repr =
     Repr.variant
       "dep"
@@ -98,8 +95,6 @@ module Map = struct
 
   let has_universe t = mem t Universe
 end
-
-module Table = Hashtbl.Make (T)
 
 let as_in_build_dir_no_source = function
   | Path.In_source_tree _ ->
