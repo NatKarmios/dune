@@ -2,8 +2,8 @@ module List = ListLabels
 module String = StringLabels
 
 (* Internal representation. The smart constructors below build these records;
-   [to_bytes] and [to_text] both consume them (after [resolve] rewrites strings
-   to interned ids). *)
+   [to_bytes] and [to_text] both consume them (after [Interned.packets]
+   rewrites strings to interned ids). *)
 
 module Arg = struct
   type value =
@@ -108,151 +108,189 @@ let seq_needs_incremental_state = 2
 (* Interned form of the model above: event name / categories and debug
    annotation names / string values are replaced by per-table integer ids, and
    the entries first introduced on each packet are gathered for its
-   [interned_data]. See [resolve]. *)
-module Iarg = struct
-  type value =
-    | Bool of bool
-    | Int of int
-    | Float of float
-    | String_iid of int
-    | Json of string
-    | Dict of t list
-    | Array of t list
+   [interned_data]. See [packets]. *)
+module Interned = struct
+  module Raw_arg = Arg
 
-  and t =
-    { name_iid : int option
-    ; value : value
-    }
-end
-
-type interned_data =
-  { event_categories : (int * string) list
-  ; event_names : (int * string) list
-  ; annotation_names : (int * string) list
-  ; annotation_strings : (int * string) list
-  }
-
-type ievent =
-  { ietype : Event.Type.t
-  ; name_iid : int option
-  ; category_iids : int list
-  ; iargs : Iarg.t list
-  ; iflow_ids : int list
-  ; itrack_uuid : int
-  ; its : int
-  }
-
-type ipacket =
-  | ITrack_descriptor of Track.t
-  | ITrack_event of
-      { ievent : ievent
-      ; interned : interned_data
-      ; sequence_flags : int
+  (* The interned entries introduced by a single packet, gathered from the
+     tables below by [Tables.take]. *)
+  module Entries = struct
+    type t =
+      { event_categories : (int * string) list
+      ; event_names : (int * string) list
+      ; annotation_names : (int * string) list
+      ; annotation_strings : (int * string) list
       }
 
-let interned_nonempty i =
-  let nonempty = function
-    | [] -> false
-    | _ :: _ -> true
-  in
-  nonempty i.event_categories
-  || nonempty i.event_names
-  || nonempty i.annotation_names
-  || nonempty i.annotation_strings
-;;
+    let is_nonempty i =
+      let nonempty = function
+        | [] -> false
+        | _ :: _ -> true
+      in
+      nonempty i.event_categories
+      || nonempty i.event_names
+      || nonempty i.annotation_names
+      || nonempty i.annotation_strings
+    ;;
+  end
 
-(* A single-namespace interning table: string -> non-zero iid, tracking which
-   ids are new since the last [take] so they can ride the packet that
-   introduces them. *)
-module Intern_table = struct
-  type t =
-    { ids : (string, int) Hashtbl.t
-    ; mutable next : int
-    ; mutable pending : (int * string) list
+  module Arg = struct
+    type value =
+      | Bool of bool
+      | Int of int
+      | Float of float
+      | String_iid of int
+      | Json of string
+      | Dict of t list
+      | Array of t list
+
+    and t =
+      { name_iid : int option
+      ; value : value
+      }
+  end
+
+  type event =
+    { type_ : Event.Type.t
+    ; name_iid : int option
+    ; category_iids : int list
+    ; args : Arg.t list
+    ; flow_ids : int list
+    ; track_uuid : int
+    ; ts : int
     }
 
-  let create () = { ids = Hashtbl.create 256; next = 1; pending = [] }
+  type packet =
+    | ITrack_descriptor of Track.t
+    | ITrack_event of
+        { ievent : event
+        ; interned : Entries.t
+        ; sequence_flags : int
+        }
 
-  let intern t s =
-    match Hashtbl.find_opt t.ids s with
-    | Some iid -> iid
-    | None ->
-      let iid = t.next in
-      t.next <- iid + 1;
-      Hashtbl.replace t.ids s iid;
-      t.pending <- (iid, s) :: t.pending;
-      iid
-  ;;
+  (* A single-namespace interning table: string -> non-zero iid (0 is reserved
+     by Perfetto), tracking which ids are new since the last [take] so they can
+     ride the packet that introduces them. *)
+  module Table = struct
+    type t =
+      { ids : (string, int) Hashtbl.t
+      ; mutable next : int
+      ; mutable pending : (int * string) list
+      }
 
-  let take t =
-    let entries = List.rev t.pending in
-    t.pending <- [];
-    entries
-  ;;
-end
+    let create () = { ids = Hashtbl.create 256; next = 1; pending = [] }
 
-(* Rewrite a packet stream into its interned form. A single left-to-right walk
-   assigns iids on first sight and emits the new entries on the packet that
-   first uses them, so interned data always precedes (or accompanies) its first
-   reference in the sequence. Track descriptors carry no interned data. *)
-let resolve packets =
-  let event_names = Intern_table.create () in
-  let event_categories = Intern_table.create () in
-  let annotation_names = Intern_table.create () in
-  let annotation_strings = Intern_table.create () in
-  let first_event = ref true in
-  let rec iarg ~named { Arg.arg_name; value } =
+    let intern t s =
+      match Hashtbl.find_opt t.ids s with
+      | Some iid -> iid
+      | None ->
+        let iid = t.next in
+        t.next <- iid + 1;
+        Hashtbl.replace t.ids s iid;
+        t.pending <- (iid, s) :: t.pending;
+        iid
+    ;;
+
+    let take t =
+      let entries = List.rev t.pending in
+      t.pending <- [];
+      entries
+    ;;
+  end
+
+  module Tables = struct
+    type t =
+      { event_categories : Table.t
+      ; event_names : Table.t
+      ; annotation_names : Table.t
+      ; annotation_strings : Table.t
+      ; mutable first_event_pending : bool
+      }
+
+    let create () =
+      { event_categories = Table.create ()
+      ; event_names = Table.create ()
+      ; annotation_names = Table.create ()
+      ; annotation_strings = Table.create ()
+      ; first_event_pending = true
+      }
+    ;;
+
+    let intern_event_category { event_categories; _ } s = Table.intern event_categories s
+    let intern_event_name { event_names; _ } s = Table.intern event_names s
+    let intern_annotation_name { annotation_names; _ } s = Table.intern annotation_names s
+
+    let intern_annotation_string { annotation_strings; _ } s =
+      Table.intern annotation_strings s
+    ;;
+
+    let take { event_categories; event_names; annotation_names; annotation_strings; _ } =
+      { Entries.event_categories = Table.take event_categories
+      ; event_names = Table.take event_names
+      ; annotation_names = Table.take annotation_names
+      ; annotation_strings = Table.take annotation_strings
+      }
+    ;;
+
+    (* Only the first packet participating in incremental state clears what an
+       earlier writer on this sequence may have left behind. *)
+    let sequence_flags t =
+      if t.first_event_pending
+      then (
+        t.first_event_pending <- false;
+        seq_incremental_state_cleared lor seq_needs_incremental_state)
+      else seq_needs_incremental_state
+    ;;
+  end
+
+  let rec arg ~tbls ~named { Raw_arg.arg_name; value } =
     let name_iid =
       if named && arg_name <> ""
-      then Some (Intern_table.intern annotation_names arg_name)
+      then Some (Tables.intern_annotation_name tbls arg_name)
       else None
     in
-    let value : Iarg.value =
+    let value : Arg.value =
       match value with
-      | Arg.Bool b -> Bool b
-      | Arg.Int i -> Int i
-      | Arg.Float f -> Float f
-      | Arg.String s -> String_iid (Intern_table.intern annotation_strings s)
-      | Arg.Json s -> Json s
-      | Arg.Dict entries -> Dict (List.map entries ~f:(iarg ~named:true))
-      | Arg.Array entries -> Array (List.map entries ~f:(iarg ~named:false))
+      | Raw_arg.Bool b -> Bool b
+      | Int i -> Int i
+      | Float f -> Float f
+      | String s -> String_iid (Tables.intern_annotation_string tbls s)
+      | Json s -> Json s
+      | Dict entries -> Dict (List.map entries ~f:(arg ~tbls ~named:true))
+      | Array entries -> Array (List.map entries ~f:(arg ~tbls ~named:false))
     in
-    { Iarg.name_iid; value }
-  in
-  List.map packets ~f:(function
+    { Arg.name_iid; value }
+  ;;
+
+  let event ~tbls { Event.etype; ename; categories; eargs; flow_ids; track_uuid; ts } =
+    let name_iid = Option.map (Tables.intern_event_name tbls) ename in
+    let category_iids = List.map categories ~f:(Tables.intern_event_category tbls) in
+    let args = List.map eargs ~f:(arg ~tbls ~named:true) in
+    let interned = Tables.take tbls in
+    let sequence_flags = Tables.sequence_flags tbls in
+    ITrack_event
+      { ievent =
+          { type_ = etype; name_iid; category_iids; args; flow_ids; track_uuid; ts }
+      ; interned
+      ; sequence_flags
+      }
+  ;;
+
+  let packet ~tbls = function
     | Track_descriptor t -> ITrack_descriptor t
-    | Track_event { Event.etype; ename; categories; eargs; flow_ids; track_uuid; ts } ->
-      let name_iid = Option.map (Intern_table.intern event_names) ename in
-      let category_iids = List.map categories ~f:(Intern_table.intern event_categories) in
-      let iargs = List.map eargs ~f:(iarg ~named:true) in
-      let interned =
-        { event_categories = Intern_table.take event_categories
-        ; event_names = Intern_table.take event_names
-        ; annotation_names = Intern_table.take annotation_names
-        ; annotation_strings = Intern_table.take annotation_strings
-        }
-      in
-      let sequence_flags =
-        if !first_event
-        then (
-          first_event := false;
-          seq_incremental_state_cleared lor seq_needs_incremental_state)
-        else seq_needs_incremental_state
-      in
-      ITrack_event
-        { ievent =
-            { ietype = etype
-            ; name_iid
-            ; category_iids
-            ; iargs
-            ; iflow_ids = flow_ids
-            ; itrack_uuid = track_uuid
-            ; its = ts
-            }
-        ; interned
-        ; sequence_flags
-        })
-;;
+    | Track_event e -> event ~tbls e
+  ;;
+
+  (* Rewrite a packet stream into its interned form. A single left-to-right
+     walk assigns iids on first sight and emits the new entries on the packet
+     that first uses them, so interned data always precedes (or accompanies)
+     its first reference in the sequence. Track descriptors carry no interned
+     data. *)
+  let packets ps =
+    let tbls = Tables.create () in
+    List.map ps ~f:(packet ~tbls)
+  ;;
+end
 
 module To_bytes = struct
   (* Protobuf wire encoding. Only the primitives we need: varints (wire type 0),
@@ -320,32 +358,31 @@ module To_bytes = struct
 
   (* DebugAnnotation. In an array the entries carry no name; a string value is
      interned via [string_value_iid] (field 17). *)
-  let rec arg buf { Iarg.name_iid; value } =
+  let rec arg buf { Interned.Arg.name_iid; value } =
     (match name_iid with
      | Some iid -> Wire.varint_field buf ~field:1 iid
      | None -> ());
     match value with
-    | Iarg.Bool b -> Wire.bool_field buf ~field:2 b
+    | Bool b -> Wire.bool_field buf ~field:2 b
     | Int i -> Wire.varint_field buf ~field:4 i
     | Float f -> Wire.double_field buf ~field:5 f
-    | String_iid iid -> Wire.varint_field buf ~field:17 iid
     | Json s -> Wire.string_field buf ~field:9 s
     | Dict entries ->
       List.iter entries ~f:(fun e -> Wire.message_field buf ~field:11 (fun b -> arg b e))
     | Array entries ->
       List.iter entries ~f:(fun e -> Wire.message_field buf ~field:12 (fun b -> arg b e))
+    | String_iid iid -> Wire.varint_field buf ~field:17 iid
   ;;
 
-  let event buf (e : ievent) =
-    Wire.varint_field buf ~field:9 (Event.Type.enum e.ietype);
+  let event buf (e : Interned.event) =
+    Wire.varint_field buf ~field:9 (Event.Type.enum e.type_);
     (match e.name_iid with
      | Some iid -> Wire.varint_field buf ~field:10 iid
      | None -> ());
     List.iter e.category_iids ~f:(fun iid -> Wire.varint_field buf ~field:3 iid);
-    Wire.varint_field buf ~field:11 e.itrack_uuid;
-    List.iter e.iargs ~f:(fun a -> Wire.message_field buf ~field:4 (fun b -> arg b a));
-    List.iter e.iflow_ids ~f:(fun id ->
-      Wire.fixed64_field buf ~field:47 (Int64.of_int id))
+    Wire.varint_field buf ~field:11 e.track_uuid;
+    List.iter e.args ~f:(fun a -> Wire.message_field buf ~field:4 (fun b -> arg b a));
+    List.iter e.flow_ids ~f:(fun id -> Wire.fixed64_field buf ~field:47 (Int64.of_int id))
   ;;
 
   (* Each interned entry is a two-field message [iid=1, name/str=2]; the entry
@@ -356,7 +393,7 @@ module To_bytes = struct
       Wire.string_field b ~field:2 s)
   ;;
 
-  let interned_data buf (i : interned_data) =
+  let interned_data buf (i : Interned.Entries.t) =
     List.iter i.event_categories ~f:(interned_entry buf ~field:1);
     List.iter i.event_names ~f:(interned_entry buf ~field:2);
     List.iter i.annotation_names ~f:(interned_entry buf ~field:3);
@@ -381,21 +418,21 @@ module To_bytes = struct
   ;;
 
   let packet buf = function
-    | ITrack_descriptor t ->
+    | Interned.ITrack_descriptor t ->
       Wire.message_field buf ~field:1 (fun p ->
         Wire.varint_field p ~field:10 trusted_packet_sequence_id;
         Wire.message_field p ~field:60 (fun b -> track b t))
     | ITrack_event { ievent = e; interned; sequence_flags } ->
       Wire.message_field buf ~field:1 (fun p ->
-        Wire.varint_field p ~field:8 e.its;
+        Wire.varint_field p ~field:8 e.ts;
         Wire.varint_field p ~field:10 trusted_packet_sequence_id;
         Wire.varint_field p ~field:13 sequence_flags;
         Wire.message_field p ~field:11 (fun b -> event b e);
-        if interned_nonempty interned
+        if Interned.Entries.is_nonempty interned
         then Wire.message_field p ~field:12 (fun b -> interned_data b interned))
   ;;
 
-  let to_bytes ipackets =
+  let encode ipackets =
     let buf = Buffer.create 4096 in
     List.iter ipackets ~f:(packet buf);
     Buffer.contents buf
@@ -412,13 +449,13 @@ module To_text = struct
       fmt
   ;;
 
-  let rec arg b indent { Iarg.name_iid; value } =
+  let rec arg b indent { Interned.Arg.name_iid; value } =
     let line fmt = line b indent fmt in
     (match name_iid with
      | Some iid -> line "name_iid: %d" iid
      | None -> ());
     match value with
-    | Iarg.Bool x -> line "bool_value: %b" x
+    | Bool x -> line "bool_value: %b" x
     | Int x -> line "int_value: %d" x
     | Float x -> line "double_value: %g" x
     | String_iid iid -> line "string_value_iid: %d" iid
@@ -458,22 +495,22 @@ module To_text = struct
     line indent "}"
   ;;
 
-  let event b indent (e : ievent) =
+  let event b indent (e : Interned.event) =
     let line fmt = line b indent fmt in
-    line "type: %s" (Event.Type.name e.ietype);
+    line "type: %s" (Event.Type.name e.type_);
     (match e.name_iid with
      | Some iid -> line "name_iid: %d" iid
      | None -> ());
     List.iter e.category_iids ~f:(fun iid -> line "category_iids: %d" iid);
-    line "track_uuid: %d" e.itrack_uuid;
-    List.iter e.iargs ~f:(fun a ->
+    line "track_uuid: %d" e.track_uuid;
+    List.iter e.args ~f:(fun a ->
       line "debug_annotations {";
       arg b (indent + 1) a;
       line "}");
-    List.iter e.iflow_ids ~f:(fun id -> line "flow_ids: %d" id)
+    List.iter e.flow_ids ~f:(fun id -> line "flow_ids: %d" id)
   ;;
 
-  let interned_data b indent (i : interned_data) =
+  let interned_entries b indent (i : Interned.Entries.t) =
     let group name field entries =
       List.iter entries ~f:(fun (iid, s) ->
         line b indent "%s {" name;
@@ -487,27 +524,27 @@ module To_text = struct
     group "debug_annotation_string_values" "str" i.annotation_strings
   ;;
 
-  let to_text ipackets =
+  let encode ipackets =
     let b = Buffer.create 4096 in
     List.iter ipackets ~f:(fun packet ->
       line b 0 "packet {";
       (match packet with
-       | ITrack_descriptor t -> track b 1 t
+       | Interned.ITrack_descriptor t -> track b 1 t
        | ITrack_event { ievent = e; interned; sequence_flags } ->
-         line b 1 "timestamp: %d" e.its;
+         line b 1 "timestamp: %d" e.ts;
          line b 1 "sequence_flags: %d" sequence_flags;
          line b 1 "track_event {";
          event b 2 e;
          line b 1 "}";
-         if interned_nonempty interned
+         if Interned.Entries.is_nonempty interned
          then (
            line b 1 "interned_data {";
-           interned_data b 2 interned;
+           interned_entries b 2 interned;
            line b 1 "}"));
       line b 0 "}");
     Buffer.contents b
   ;;
 end
 
-let to_bytes packets = To_bytes.to_bytes (resolve packets)
-let to_text packets = To_text.to_text (resolve packets)
+let to_bytes packets = To_bytes.encode (Interned.packets packets)
+let to_text packets = To_text.encode (Interned.packets packets)
