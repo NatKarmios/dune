@@ -1067,7 +1067,7 @@ let scalar_arg key = function
         (match float_of_string s with
          | f -> P.Arg.float ~name:key f
          | exception _ -> P.Arg.string ~name:key s))
-  | v -> P.Arg.json ~name:key (Json.to_string (Trace_event.json_of_sexp v))
+  | v -> P.Arg.json ~name:key (Json.to_string (Trace_common.Event_sexp.to_json v))
 ;;
 
 (* Classify one [key = value] field as a recognised structural field or an
@@ -1127,16 +1127,15 @@ let event_fields ~name rest =
    nothing else need be pushed for them here. Everything else is a flat
    event on the main thread track, as before. *)
 let add t sexp =
-  let cat, name, ts_sexp, rest, _ = Trace_event.base_of_sexp sexp in
-  let ts, dur = Trace_event.times_of_sexp ts_sexp in
+  let cat, name, ts_sexp, rest, _ = Trace_common.Event_sexp.to_base_args sexp in
+  let ts, dur = Trace_common.Event_sexp.to_times ts_sexp in
   let ts_ns = Time.to_ns ts in
   t.last_ts <- ts_ns;
   match name with
   | "intern" -> record_interns t rest
   | _ ->
     ensure_process t;
-    let async_phase, rest = Trace_event.async_phase_of_sexp rest in
-    let async_id, rest = Trace_event.async_id_of_sexp rest in
+    let async_phase, async_id, rest = Trace_common.Event_sexp.to_async_args rest in
     (match async_phase, async_id with
      | Some ("begin" | "end"), Some id ->
        record_graph_span t ~cat ~name ~async_phase ~async_id:(Some id) ~ts:ts_ns rest
@@ -1198,3 +1197,39 @@ let to_packets t =
     push_graph_section t ~name:"graph-deps" deps);
   List.rev t.rev_packets
 ;;
+
+let info =
+  let doc = "Convert the trace file to Perfetto's protobuf format" in
+  Cmd.info "perfetto" ~doc
+;;
+
+let term =
+  let+ trace_file = Trace_common.term
+  and+ output =
+    Arg.(
+      value
+      & opt (some string) None
+      & info
+          [ "o"; "output" ]
+          ~docv:"FILE"
+          ~doc:(Some "Write to this file instead of stdout"))
+  and+ text =
+    Arg.(
+      value
+      & flag
+      & info
+          [ "text" ]
+          ~doc:(Some "Emit a human-readable text dump instead of binary protobuf"))
+  in
+  let t = create () in
+  Trace_common.Event_sexp.iter trace_file ~f:(add t);
+  let packets = to_packets t in
+  let data =
+    if text then Dune_perfetto.to_text packets else Dune_perfetto.to_bytes packets
+  in
+  match output with
+  | Some file -> Io.String_path.write_file ~binary:true file data
+  | None -> print_string data
+;;
+
+let cmd = Cmd.v info term

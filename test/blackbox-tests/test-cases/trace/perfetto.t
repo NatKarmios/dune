@@ -26,8 +26,15 @@ events onto a main thread track.
 The `--text` flag emits a human-readable, protobuf-text-format-style dump.
 Cram runs commands under pipefail, and the dump is large enough that a
 `grep -q` closing the pipe early would kill the producer with SIGPIPE, so
-capture it to a file once per build and grep that:
+capture it to a file once per build and grep that.
 
+Whether a cache hit or source dep collapses to a single instant is gated on
+its duration as well as its outcome (1ms by default). Only the threshold
+section below is about that gate; everywhere else it would just make the
+assertions race the clock, so pin it high and let collapse follow from the
+outcome alone:
+
+  $ export DUNE_TRACE_COLLAPSE_THRESHOLD_NS=1000000000
   $ dune trace perfetto --text > dump.textpb
 
 A single process track named "dune" holds a "main" thread track:
@@ -622,11 +629,11 @@ Cache hits execute no action, so this trace has no exec-rule-action instants
 
 The collapse is gated on the duration as well as the outcome: a cache hit or
 source dep that took real time (a contended shared cache, a cold page cache)
-keeps its start/finish pair, since there is a genuine interval to show.
-`DUNE_TRACE_COLLAPSE_THRESHOLD_NS` overrides the 1ms threshold, so converting
-this same cache-hit trace with a threshold of 0 collapses nothing -- and the
-pairs emitted in place of the collapsed instants carry flows, which a
-collapsed instant does not:
+keeps its start/finish pair, since there is a genuine interval to show. That
+gate is what `DUNE_TRACE_COLLAPSE_THRESHOLD_NS` sets, pinned high everywhere
+else in this file; at the other extreme, converting this same cache-hit trace
+with a threshold of 0 collapses nothing -- and the pairs emitted in place of
+the collapsed instants carry flows, which a collapsed instant does not:
 
   $ DUNE_TRACE_COLLAPSE_THRESHOLD_NS=0 dune trace perfetto --text > dump.textpb
   $ event_args | grep -q -- '-resolved' && echo yes

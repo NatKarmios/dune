@@ -1,5 +1,5 @@
 (** Perfetto native-protobuf export. Consumes the same csexp event stream as
-    [Trace_event.json_of_event], mapping each graph async span to a pair of
+    [Trace_cat.json_of_event], mapping each graph async span to a pair of
     lifecycle instants (or, for a cache hit / source dep, a single collapsed
     instant) on a fixed track shared by its kind, and flat complete/instant
     events to slices/instants on a main thread track. It also accumulates the
@@ -21,3 +21,7 @@ val add : t -> Sexp.t -> unit
     the graph blob and any span left open by a crash can only be emitted at
     that point. *)
 val to_packets : t -> Dune_perfetto.packet list
+
+(** [dune trace perfetto] writes the converted trace to [-o FILE] or stdout, as
+    binary protobuf or, with [--text], as a human-readable dump. *)
+val cmd : unit Cmdliner.Cmd.t
