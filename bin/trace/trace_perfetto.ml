@@ -1,21 +1,11 @@
 open Import
 
-(* The build-graph blob: a chunked dump of the graph's structure (the intern
-   table, the factored dep-set table, and one record per exec-rule/build-dep
-   span), emitted as instants on a dedicated "dune-graph" track instead of
-   scattering it across per-slice debug annotations (see
-   doc/dev/trace-graph-perfetto.md, phase 1). Payloads are line-oriented,
-   tab-separated records; this module knows how to render the pieces of a
-   single record (a forced-by tag, a dep outcome, a rule outcome) and how to
-   chunk and escape the assembled lines. The only converter state it holds is
-   the dep-set table ([Dep_sets], phase 8), which is inseparable from
-   rendering a dep field. *)
+(* The build graph is emitted in chunked blobs on special "dune-graph" instant
+   events at the end of the trace. *)
 module Graph_blob = struct
   let version = 1
   let default_chunk_size = 4 * 1024 * 1024
 
-  (* Overridable so a test can force multi-chunk framing without a
-     multi-megabyte trace. Non-positive or unparseable values are ignored. *)
   let chunk_size =
     lazy
       (match Sys.getenv_opt "DUNE_TRACE_GRAPH_CHUNK_SIZE" with
@@ -26,9 +16,7 @@ module Graph_blob = struct
           | _ -> default_chunk_size))
   ;;
 
-  (* C-style escaping of the three characters that would otherwise corrupt the
-     line/tab framing. Only used on [graph-dict] values: every other field in
-     a record is a digit, a comma, or one of our own fixed tags. *)
+  (* Escapce characters that would break the blob's line- and tab-separation *)
   let escape s =
     let buf = Buffer.create (String.length s) in
     String.iter s ~f:(fun c ->
@@ -40,12 +28,6 @@ module Graph_blob = struct
     Buffer.contents buf
   ;;
 
-  (* Split [records] into chunks of at most [chunk_size] bytes, never
-     splitting inside a record (a single over-long record gets a chunk of its
-     own). Records are newline-*terminated* rather than newline-separated, so
-     the last record of a chunk keeps its newline: concatenating the chunks in
-     order reproduces the payload byte for byte, and a chunk read on its own
-     still holds a whole number of records. [] in, [] out. *)
   let chunks records =
     let limit = Lazy.force chunk_size in
     let flush chunks cur =
@@ -65,10 +47,6 @@ module Graph_blob = struct
     List.rev (flush chunks cur)
   ;;
 
-  (* [forced_by] rendered as one of the short codes in the schema: "u"
-     (unknown), "r<id>", "v<id>", "d<id>", "i<id>", "g<id>", "p<id>", "c",
-     "q". An unrecognised shape degrades to "u" rather than failing the whole
-     conversion. *)
   let forced_by_code = function
     | Sexp.List [] -> "u"
     | Sexp.List (Atom "rule" :: Atom id :: _) -> "r" ^ id
@@ -82,9 +60,6 @@ module Graph_blob = struct
     | _ -> "u"
   ;;
 
-  (* [Build_dep.outcome] rendered as "r<rule_id>" | "s" | "x<id,id,...>" | "u".
-     "u" is a resolution dune reported it could not determine, as distinct from
-     the "?" of a span that never ended. *)
   let dep_resolution = function
     | Sexp.List (Atom "rule" :: Atom id :: _) -> "r" ^ id
     | Sexp.List (Atom "is-source" :: _) -> "s"
@@ -99,7 +74,6 @@ module Graph_blob = struct
     | _ -> "?"
   ;;
 
-  (* [Exec_rule.outcome_to_string]'s value rendered as a single letter. *)
   let rule_outcome_code = function
     | "executed" -> "X"
     | "local-cache-hit" -> "L"
@@ -110,8 +84,6 @@ module Graph_blob = struct
     | _ -> "?"
   ;;
 
-  (* [Build_dep.status] rendered as "" (succeeded, the common case, which the
-     event omits) | "f" | "c". *)
   let dep_status_code = function
     | Some (Sexp.Atom "failed") -> "f"
     | Some (Sexp.Atom "cancelled") -> "c"
@@ -120,30 +92,12 @@ module Graph_blob = struct
 
   let ids_field ids = String.concat ~sep:"," ids
 
-  (* Dep sets are not spelled out per rule: a [graph-rules] line names its
-     dep set by id, [graph-depsets] describes each distinct set as a core
-     plus the ids it adds to that core, and [graph-cores] holds the cores.
-     Cores are flat -- a core never references another core -- so
-     reconstructing a set is exactly one join deep:
-     [deps(S) = core_members(C) + adds(S)]. On a monorepo trace this turns
-     28.1M (rule, dep) pairs into ~16% as many rows; see
-     doc/dev/trace-graph-perfetto.md for the measurements behind the
-     constants below.
-
-     The encoder is online: sets are encoded as their rules' spans end, and
-     the only state that grows with the trace is the table of distinct sets
-     (which replaces the dep ids the rule lines used to carry). *)
+  (* Rule deps are optimised by finding "cores" of common deps and describing a
+     rule's deps as additions to a core. *)
   module Dep_sets = struct
-    (* Chosen by measurement on a real monorepo trace, not by taste: a
-       larger core pool measured worse (stale cores win the "largest
-       subset" test with a poor covering and displace the mining step). *)
     let window_size = 32
     let pool_size = 64
     let min_core_size = 16
-
-    (* A dep set is a sorted, duplicate-free list of dep ids; [ids_field] of
-       it is both its exact identity (no hashing: a digest collision would
-       silently corrupt the graph) and what gets emitted. *)
     let of_ids ids = List.sort_uniq ids ~compare:String.compare
 
     let rec is_subset a ~of_:b =
@@ -323,27 +277,17 @@ end
 
 module P = Dune_perfetto
 
-(* Track uuids: a single process track, a main thread track, a graph-blob
-   track, and one fixed track per graph-span kind, all children of the
-   process. Per-span tracks are gone -- unrelated spans of the same kind now
-   share one track as instants, which have no nesting semantics (see
-   doc/dev/trace-graph-perfetto.md, phase 2). Exec-rule-action spans are no
-   exception: phase 3 rendered them as duration slices on a pool of reused
-   lane tracks, on the assumption that concurrency was bounded by -j, but
-   the -j throttle is acquired per-process below the span (see phase 6), so
-   the pool grew with the ready set. They are lifecycle instants too. *)
-let process_uuid = 1
-let main_thread_uuid = 2
-let graph_uuid = 3
-let exec_rule_uuid = 4
-let build_dep_uuid = 5
-let gen_rules_uuid = 6
-let dynamic_includes_uuid = 7
-let exec_rule_action_uuid = 8
+module Track_uuid = struct
+  let process = 1
+  let main_thread = 2
+  let graph = 3
+  let exec_rule = 4
+  let build_dep = 5
+  let gen_rules = 6
+  let dynamic_includes = 7
+  let exec_rule_action = 8
+end
 
-(* The begin-side fields of an open exec-rule span, buffered under its
-   [async_id] (with its begin timestamp, to compute [dur_ns] and place the
-   start instant) until the matching end supplies the outcome/deps. *)
 type rule_begin =
   { rule_id : string
   ; dir : string
@@ -354,7 +298,6 @@ type rule_begin =
   ; flow_id : int
   }
 
-(* Likewise for an open build-dep span. *)
 type dep_begin =
   { dep : string
   ; forced_by : Sexp.t
@@ -362,26 +305,18 @@ type dep_begin =
   ; flow_id : int
   }
 
-(* Likewise for an open gen-rules span. Not part of the graph blob (only
-   exec-rule/build-dep spans are), so there is no [forced_by] to keep. *)
 type gen_rules_begin =
   { gen_rules_dir : string
   ; gen_rules_begin_ts : int
   ; gen_rules_flow_id : int
   }
 
-(* Likewise for an open dynamic-includes span. *)
 type dynamic_includes_begin =
   { dynamic_includes_dune_file : string
   ; dynamic_includes_begin_ts : int
   ; dynamic_includes_flow_id : int
   }
 
-(* Likewise for an open exec-rule-action span. It has no flow id of its
-   own: it shares its rule's [async_id] and runs strictly inside the rule's
-   span, so the rule's begin is still buffered when the action begins and
-   its flow id can be borrowed then, chaining the action into the rule's
-   lifecycle. [] if the rule's begin was malformed and thus not buffered. *)
 type action_begin =
   { action_rule_id : string
   ; action_begin_ts : int
@@ -391,9 +326,7 @@ type action_begin =
 type t =
   { mutable declared_process : bool
   ; declared_tracks : (int, unit) Table.t
-  ; (* Interned strings (targets and deps share one table, see the [intern]
-       event). Maps id -> readable value. *)
-    names : (int, string) Table.t
+  ; interned_strings : (int, string) Table.t
   ; mutable rev_packets : P.packet list
   ; (* Timestamp (ns) of the last event seen, including [intern] events;
        used to place the graph blob's instants. *)
@@ -402,26 +335,17 @@ type t =
   ; open_deps : (int, dep_begin) Table.t
   ; open_gen_rules : (int, gen_rules_begin) Table.t
   ; open_dynamic_includes : (int, dynamic_includes_begin) Table.t
-  ; (* Keyed by the async_id the action shares with its rule; the rule's own
-       begin lives in [open_rules] under the same key. *)
-    open_actions : (int, action_begin) Table.t
-  ; (* One fresh flow id per buffered span begin, chaining its lifecycle
-       events (start instant, the action's two instants, finish instant) in
-       timestamp order (see doc/dev/trace-graph-perfetto.md, phases 4 and
-       6). Collapsed instants carry no flow, so a cache-hit/source span's id
-       is simply never emitted. *)
-    mutable next_flow_id : int
+  ; open_actions : (int, action_begin) Table.t
+  ; mutable next_flow_id : int
   ; mutable rev_rule_lines : string list
   ; mutable rev_dep_lines : string list
-  ; (* The factored dep-set table the rule lines' dep fields point into
-       (see [Graph_blob.Dep_sets]), filled as rule spans end. *)
-    dep_sets : Graph_blob.Dep_sets.t
+  ; dep_sets : Graph_blob.Dep_sets.t
   }
 
 let create () =
   { declared_process = false
   ; declared_tracks = Table.create (module Int) 8
-  ; names = Table.create (module Int) 2048
+  ; interned_strings = Table.create (module Int) 2048
   ; rev_packets = []
   ; last_ts = 0
   ; open_rules = Table.create (module Int) 256
@@ -454,13 +378,15 @@ let ensure_process t =
   if not t.declared_process
   then (
     t.declared_process <- true;
-    push t (P.Track_descriptor (P.Track.process ~uuid:process_uuid ~pid:0 ~name:"dune"));
+    push
+      t
+      (P.Track_descriptor (P.Track.process ~uuid:Track_uuid.process ~pid:0 ~name:"dune"));
     push
       t
       (P.Track_descriptor
          (P.Track.thread
-            ~uuid:main_thread_uuid
-            ~parent_uuid:process_uuid
+            ~uuid:Track_uuid.main_thread
+            ~parent_uuid:Track_uuid.process
             ~pid:0
             ~tid:0
             ~name:"main")))
@@ -473,13 +399,11 @@ let ensure_track t uuid ~name =
   | Some () -> ()
   | None ->
     Table.set t.declared_tracks uuid ();
-    push t (P.Track_descriptor (P.Track.child ~uuid ~parent_uuid:process_uuid ~name))
+    push
+      t
+      (P.Track_descriptor (P.Track.child ~uuid ~parent_uuid:Track_uuid.process ~name))
 ;;
 
-(* Populate the intern table from an [intern] event's [id -> value] entries.
-   These are not emitted as Perfetto events; they are dumped as the blob's
-   [graph-dict] section, which is what resolves the ids carried by the
-   graph events and the blob's records into readable strings. *)
 let record_interns t rest =
   let entry_field entry key =
     match entry with
@@ -492,7 +416,7 @@ let record_interns t rest =
       match entry_field entry "id", entry_field entry "value" with
       | Some (Atom id), Some (Atom value) ->
         (match int_of_string id with
-         | id -> Table.set t.names id value
+         | id -> Table.set t.interned_strings id value
          | exception _ -> ())
       | _ -> ())
   | _ -> ()
@@ -580,11 +504,12 @@ let emit_exec_rule_end t ~ts (b : rule_begin) ~rule_outcome =
     | "local-cache-hit" | "shared-cache-hit" -> true
     | _ (* "executed", or a failure/cancellation *) -> false
   in
+  let uuid = Track_uuid.exec_rule in
   if is_cache_hit && collapses dur_ns
   then
     push_instant
       t
-      ~uuid:exec_rule_uuid
+      ~uuid
       ~track_name:"exec-rule"
       ~name:"exec-rule-resolved"
       ~ts:b.begin_ts
@@ -593,7 +518,7 @@ let emit_exec_rule_end t ~ts (b : rule_begin) ~rule_outcome =
   else (
     push_instant
       t
-      ~uuid:exec_rule_uuid
+      ~uuid
       ~track_name:"exec-rule"
       ~name:"exec-rule-start"
       ~ts:b.begin_ts
@@ -601,7 +526,7 @@ let emit_exec_rule_end t ~ts (b : rule_begin) ~rule_outcome =
       ~args:(dune_args (rule_id_arg b.rule_id));
     push_instant
       t
-      ~uuid:exec_rule_uuid
+      ~uuid
       ~track_name:"exec-rule"
       ~name:"exec-rule-finish"
       ~ts
@@ -614,7 +539,7 @@ let emit_exec_rule_end t ~ts (b : rule_begin) ~rule_outcome =
 let push_action_start t (b : action_begin) =
   push_instant
     t
-    ~uuid:exec_rule_action_uuid
+    ~uuid:Track_uuid.exec_rule_action
     ~track_name:"exec-rule-action"
     ~name:"exec-rule-action-start"
     ~ts:b.action_begin_ts
@@ -628,7 +553,7 @@ let emit_action_end t ~ts (b : action_begin) =
   push_action_start t b;
   push_instant
     t
-    ~uuid:exec_rule_action_uuid
+    ~uuid:Track_uuid.exec_rule_action
     ~track_name:"exec-rule-action"
     ~name:"exec-rule-action-finish"
     ~ts
@@ -651,11 +576,12 @@ let emit_build_dep_end t ~ts (b : dep_begin) ~dep_outcome =
     | Sexp.List (Atom "is-source" :: _) -> true
     | _ -> false
   in
+  let uuid = Track_uuid.build_dep in
   if is_source && collapses dur_ns
   then
     push_instant
       t
-      ~uuid:build_dep_uuid
+      ~uuid
       ~track_name:"build-dep"
       ~name:"build-dep-resolved"
       ~ts:b.begin_ts
@@ -664,7 +590,7 @@ let emit_build_dep_end t ~ts (b : dep_begin) ~dep_outcome =
   else (
     push_instant
       t
-      ~uuid:build_dep_uuid
+      ~uuid
       ~track_name:"build-dep"
       ~name:"build-dep-start"
       ~ts:b.begin_ts
@@ -672,7 +598,7 @@ let emit_build_dep_end t ~ts (b : dep_begin) ~dep_outcome =
       ~args:(dune_args (dep_id_arg b.dep));
     push_instant
       t
-      ~uuid:build_dep_uuid
+      ~uuid
       ~track_name:"build-dep"
       ~name:"build-dep-finish"
       ~ts
@@ -685,9 +611,10 @@ let emit_build_dep_end t ~ts (b : dep_begin) ~dep_outcome =
    may turn out not to be standalone/group-root). *)
 let emit_gen_rules_end t ~ts (b : gen_rules_begin) ~dune_file =
   let dur_ns = ts - b.gen_rules_begin_ts in
+  let uuid = Track_uuid.gen_rules in
   push_instant
     t
-    ~uuid:gen_rules_uuid
+    ~uuid
     ~track_name:"gen-rules"
     ~name:"gen-rules-start"
     ~ts:b.gen_rules_begin_ts
@@ -695,7 +622,7 @@ let emit_gen_rules_end t ~ts (b : gen_rules_begin) ~dune_file =
     ~args:(dune_args [ P.Arg.string ~name:"dir" b.gen_rules_dir ]);
   push_instant
     t
-    ~uuid:gen_rules_uuid
+    ~uuid
     ~track_name:"gen-rules"
     ~name:"gen-rules-finish"
     ~ts
@@ -711,9 +638,10 @@ let emit_gen_rules_end t ~ts (b : gen_rules_begin) ~dune_file =
 (* Likewise for dynamic-includes: no collapsed form either. *)
 let emit_dynamic_includes_end t ~ts (b : dynamic_includes_begin) =
   let dur_ns = ts - b.dynamic_includes_begin_ts in
+  let uuid = Track_uuid.dynamic_includes in
   push_instant
     t
-    ~uuid:dynamic_includes_uuid
+    ~uuid
     ~track_name:"dynamic-includes"
     ~name:"dynamic-includes-start"
     ~ts:b.dynamic_includes_begin_ts
@@ -721,7 +649,7 @@ let emit_dynamic_includes_end t ~ts (b : dynamic_includes_begin) =
     ~args:(dune_args [ P.Arg.string ~name:"dune_file" b.dynamic_includes_dune_file ]);
   push_instant
     t
-    ~uuid:dynamic_includes_uuid
+    ~uuid
     ~track_name:"dynamic-includes"
     ~name:"dynamic-includes-finish"
     ~ts
@@ -983,7 +911,7 @@ let flush_open_start_instants t =
   List.iter (sorted t.open_rules) ~f:(fun (_async_id, (b : rule_begin)) ->
     push_instant
       t
-      ~uuid:exec_rule_uuid
+      ~uuid:Track_uuid.exec_rule
       ~track_name:"exec-rule"
       ~name:"exec-rule-start"
       ~ts:b.begin_ts
@@ -992,7 +920,7 @@ let flush_open_start_instants t =
   List.iter (sorted t.open_deps) ~f:(fun (_async_id, (b : dep_begin)) ->
     push_instant
       t
-      ~uuid:build_dep_uuid
+      ~uuid:Track_uuid.build_dep
       ~track_name:"build-dep"
       ~name:"build-dep-start"
       ~ts:b.begin_ts
@@ -1001,7 +929,7 @@ let flush_open_start_instants t =
   List.iter (sorted t.open_gen_rules) ~f:(fun (_async_id, (b : gen_rules_begin)) ->
     push_instant
       t
-      ~uuid:gen_rules_uuid
+      ~uuid:Track_uuid.gen_rules
       ~track_name:"gen-rules"
       ~name:"gen-rules-start"
       ~ts:b.gen_rules_begin_ts
@@ -1012,7 +940,7 @@ let flush_open_start_instants t =
     ~f:(fun (_async_id, (b : dynamic_includes_begin)) ->
       push_instant
         t
-        ~uuid:dynamic_includes_uuid
+        ~uuid:Track_uuid.dynamic_includes
         ~track_name:"dynamic-includes"
         ~name:"dynamic-includes-start"
         ~ts:b.dynamic_includes_begin_ts
@@ -1022,10 +950,8 @@ let flush_open_start_instants t =
     push_action_start t b)
 ;;
 
-(* The intern table as "id\tvalue" lines, sorted by id: the only place in
-   the blob where an arbitrary (escaped) string appears. *)
 let dict_lines t =
-  Table.to_list t.names
+  Table.to_list t.interned_strings
   |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
   |> List.map ~f:(fun (id, value) -> sprintf "%d\t%s" id (Graph_blob.escape value))
 ;;
@@ -1038,7 +964,7 @@ let push_graph_section t ~name records =
   List.iteri chunks ~f:(fun seq data ->
     push_instant
       t
-      ~uuid:graph_uuid
+      ~uuid:Track_uuid.graph
       ~track_name:"dune-graph"
       ~name
       ~ts:t.last_ts
@@ -1101,11 +1027,8 @@ let classify_field ~name key v =
   | _ -> `Top (scalar_arg key v)
 ;;
 
-(* Map an event's [rest] fields to Perfetto debug annotations. Recognised
-   structural fields are grouped under a "dune" dict (surfacing as e.g.
-   [debug.dune.target_files] in Trace Processor); unrecognised fields are
-   left at the top level. Their strings are interned by [Dune_perfetto] when
-   serialising. *)
+(* Maps an event's [rest] fields to Perfetto debug annotations.
+   Recognised structural fields are grouped under a "dune" dict. *)
 let event_fields ~name rest =
   let dune, top =
     List.filter_map rest ~f:(function
@@ -1120,12 +1043,6 @@ let event_fields ~name rest =
   | _ :: _ -> P.Arg.dict ~name:"dune" dune :: top
 ;;
 
-(* Graph async events (exec-rule/build-dep/gen-rules/dynamic-includes) are
-   the only users of [async_phase]/[async_id] (see
-   [Dune_engine.Graph_trace]) and are fully handled by [record_graph_span]:
-   begins are buffered and ends emit the lifecycle instants directly, so
-   nothing else need be pushed for them here. Everything else is a flat
-   event on the main thread track, as before. *)
 let add t sexp =
   let cat, name, ts_sexp, rest, _ = Trace_common.Event_sexp.to_base_args sexp in
   let ts, dur = Trace_common.Event_sexp.to_times ts_sexp in
@@ -1142,6 +1059,7 @@ let add t sexp =
      | _ ->
        let args = event_fields ~name rest in
        let open P.Event.Type in
+       let track_uuid = Track_uuid.main_thread in
        (match dur with
         | Some dur ->
           let stop = ts_ns + Time.Span.to_ns dur in
@@ -1153,11 +1071,9 @@ let add t sexp =
                   ~categories:[ cat ]
                   ~args
                   Begin
-                  ~track_uuid:main_thread_uuid
+                  ~track_uuid
                   ~ts:ts_ns));
-          push
-            t
-            (P.Track_event (P.Event.create End ~track_uuid:main_thread_uuid ~ts:stop))
+          push t (P.Track_event (P.Event.create End ~track_uuid ~ts:stop))
         | None ->
           push
             t
@@ -1167,17 +1083,10 @@ let add t sexp =
                   ~categories:[ cat ]
                   ~args
                   Instant
-                  ~track_uuid:main_thread_uuid
+                  ~track_uuid
                   ~ts:ts_ns))))
 ;;
 
-(* The graph blob can only be assembled once the whole stream has been seen
-   (it needs every intern entry and the EOF-time set of still-open spans),
-   so it is flushed here rather than incrementally in [add]; the same is
-   true of the EOF-only "-start" instants for spans left open by a
-   crash/interrupt. The blob is emitted only if the trace has any [graph]
-   category data, leaving existing traces (and assertions about them)
-   unchanged. *)
 let to_packets t =
   let dict = dict_lines t in
   let rules = List.rev t.rev_rule_lines @ flush_open_rules t in
@@ -1187,10 +1096,6 @@ let to_packets t =
   then (
     ensure_process t;
     push_graph_section t ~name:"graph-dict" dict;
-    (* The cores and the dep sets were encoded as the rule spans ended;
-       only their emission waits for EOF, like the other sections. A
-       section with no records emits no instant at all, so a build whose
-       dep sets are all too small to factor has no [graph-cores]. *)
     push_graph_section t ~name:"graph-cores" (Graph_blob.Dep_sets.core_lines t.dep_sets);
     push_graph_section t ~name:"graph-depsets" (Graph_blob.Dep_sets.set_lines t.dep_sets);
     push_graph_section t ~name:"graph-rules" rules;
