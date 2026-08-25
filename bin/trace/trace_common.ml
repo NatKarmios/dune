@@ -86,11 +86,6 @@ module Event_sexp = struct
     | _ -> invalid sexp
   ;;
 
-  (* Graph events are Chrome nestable-async events (see
-     [Dune_engine.Graph_trace]): they carry an "async_phase" arg
-     ("begin"/"end"/"instant", rendered as ph b/e/n) and an integer "async_id"
-     pairing a begin with its end. Both are removed from [rest] so they surface
-     as top-level fields rather than in the event's [args]. *)
   let to_async_args rest =
     let phase =
       List.find_map rest ~f:(function
