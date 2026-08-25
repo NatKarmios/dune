@@ -80,11 +80,9 @@ other one fails.
 
 This part of the test relies on the scheduler killing that running action:
 --stop-on-first-error fires the cancellation, and the sleep below only ends
-because the process is terminated. That path is not platform-specific --
-Process_watcher.kill_process_group branches on Sys.win32 and nothing else -- but
-cancellation is not always prompt: test-cases/action-runner/stop-on-first-error.t
-is disabled for exactly that reason when action runners are involved. So the
-build below is bounded rather than left to hang.
+because the process is terminated. Cancellation is not always prompt - see
+test-cases/action-runner/stop-on-first-error.t - so the build below is bounded
+rather than left to hang.
 
   $ rm -rf _build
   $ marker="$TMPDIR/slow-started"
@@ -146,10 +144,11 @@ consumer can tell apart from a span that simply never ended:
   > '
   unknown (cancelled)
 
-Building a dep records what it resolved to even when building it fails. A file
-dep resolves to its producing rule, a glob to the files it matched, and an alias
-to its expansion; the first two are known before the building that fails, and
-the alias's is recovered by re-walking its definitions without building them.
+Building a dep records what it resolved to even when building it fails. A file 
+dep resolves to its producing rule (unless it is in the source tree), a glob to 
+the files it matched, and an alias to its expansion; the first two are known 
+before the building that fails, and the alias's is recovered by re-walking its 
+definitions without building them.  
 
   $ rm -rf _build
   $ touch a.src b.src
@@ -210,7 +209,7 @@ rule, the dep's span therefore outlives that rule's exec-rule span:
   > '
   true
 
-The alias's recovered expansion is the dep whose build failed, not an empty one:
+The alias's recovered expansion includes the dep whose build failed:
 
   $ dune trace cat | jq -sc '
   >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
@@ -223,11 +222,11 @@ The alias's recovered expansion is the dep whose build failed, not an empty one:
   > '
   [["_build/default/boom.txt"]]
 
-When a rule's deps cannot be recovered either, the end event says so rather than
-reporting an empty set, which a rule with no deps at all would also report. That
-happens when the evaluation fails somewhere Lazy evaluation also has to go: a
-%{read:...} pform is an Of_memo that builds the file it reads, so its failure is
-cached and recovery re-enters it.
+When a rule's deps cannot be recovered either, the end event states
+it implicitly to distinguish from a rule with no deps.  This happens
+for computations that happen even under lazy evaluation (e.g. Of_memo):
+a %{read:...} pform is an Of_memo that builds the file it reads, so its
+failure is cached and recovery re-enters it.
 
   $ rm -rf _build
   $ cat >dune <<EOF
@@ -242,8 +241,8 @@ cached and recovery re-enters it.
   $ DUNE_TRACE=+graph dune build r-out.txt 2>/dev/null
   [1]
 
-The rule that failed in its action has known (empty) deps; the one whose
-recovery failed is marked unknown instead:
+A rule that fails in its action has known (empty) deps; one whose recovery
+failed is marked unknown instead:
 
   $ dune trace cat | jq -sr '
   >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
@@ -262,17 +261,16 @@ recovery failed is marked unknown instead:
   r-out.txt dep-fail deps_unknown=true
 
 Recovering a rule's deps runs its action builder without building anything, but
-that still runs its Of_memo nodes, which can force a build of their own. Such a
+this still runs its Of_memo nodes, which can force a build of their own. Such a
 build is attributed to the recovery rather than to the rule, so it is clear it
 happened after the rule had already failed.
 
-Reaching one takes a specific shape. Eager evaluation stops at the dep whose
-build fails, so anything sequenced after it is never forced; Lazy evaluation
-skips the building and carries on, reaching it for the first time. "diff?" is
-where a rule's action builder sequences the two that way: its first argument
-becomes a dep, and the continuation folds Action_builder.if_file_exists over the
-optional ones. The directory target is load-bearing -- if_file_exists only
-performs a build when resolving a path under one.
+Reaching one takes a specific shape: Eager evaluation stops at the dep
+whose build fails, so anything sequenced after it is never forced; Lazy
+evaluation skips the building and carries on, reaching it for the first
+time. "diff?" demonstrates this: its first argument becomes a dep, and the
+continuation folds Action_builder.if_file_exists over the optional ones. For
+a file under a directory target, if_file_exists builds that directory.
 
   $ rm -rf _build
   $ cat >dune <<EOF
