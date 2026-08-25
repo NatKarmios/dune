@@ -1,6 +1,3 @@
-(** What every [dune trace] subcommand shares: reading a trace file's events,
-    and the command line that names it. *)
-
 open Import
 
 module Event_sexp : sig
