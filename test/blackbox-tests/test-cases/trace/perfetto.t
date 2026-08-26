@@ -1,7 +1,8 @@
 `dune trace perfetto` converts the trace file to Perfetto's native protobuf
-format. It reuses the same event stream as `dune trace cat`, mapping graph
-async spans to lifecycle instants on one fixed track per span kind and flat
-events onto a main thread track.
+format.
+
+Graph events have special handling, and induce additional events carrying
+build graph data.
 
   $ make_dune_project 3.21
 
@@ -26,13 +27,11 @@ events onto a main thread track.
 The `--text` flag emits a human-readable, protobuf-text-format-style dump.
 Cram runs commands under pipefail, and the dump is large enough that a
 `grep -q` closing the pipe early would kill the producer with SIGPIPE, so
-capture it to a file once per build and grep that.
+we capture it to a file once per build and grep that.
 
-Whether a cache hit or source dep collapses to a single instant is gated on
-its duration as well as its outcome (1ms by default). Only the threshold
-section below is about that gate; everywhere else it would just make the
-assertions race the clock, so pin it high and let collapse follow from the
-outcome alone:
+A cache hit or source dep collapses from a begin/end event pair to a single
+instant, gated on its duration as well as its outcome (1ms by default). We
+pin it high to make collapses consistently follow from outcome alone.
 
   $ export DUNE_TRACE_COLLAPSE_THRESHOLD_NS=1000000000
   $ dune trace perfetto --text > dump.textpb
@@ -53,11 +52,8 @@ Flat events with a duration (e.g. spawned processes) still become slices
   yes
 
 Graph async spans (exec-rule, exec-rule-action, build-dep, gen-rules,
-dynamic-includes) become instants instead: unrelated spans of the same kind
-share one fixed track, so track descriptors no longer scale with the number
-of spans. This project only exercises four of the five kinds (no subdirectory
-means no dynamic-includes span), for seven tracks in total -- the process, the
-main thread, the graph blob, and the four kind tracks:
+dynamic-includes) become instants instead, as overlapping durations do not
+visually scale well.
 
   $ grep -c 'track_descriptor {' dump.textpb
   7
@@ -70,11 +66,8 @@ main thread, the graph blob, and the four kind tracks:
   $ grep -q 'name: "gen-rules"' dump.textpb && echo yes
   yes
 
-Each kind's lifecycle is a start instant (at the begin timestamp) and a
-finish instant carrying `dur_ns`. The csexp `async_id` that pairs a begin
-with its end is converter bookkeeping and does not survive into the output:
-what pairs the instants downstream is the id keying the span's graph-blob
-record (`rule_id` / `dep_id`, see below):
+Each kind's lifecycle is a start instant (at the begin timestamp) and a finish
+instant carrying `dur_ns`, associated via the relevant rule or dep ID.
 
   $ grep -q 'type: TYPE_INSTANT' dump.textpb && echo yes
   yes
@@ -95,9 +88,7 @@ record (`rule_id` / `dep_id`, see below):
   $ grep -q 'name: "dur_ns"' dump.textpb && echo yes
   yes
 
-The graph tracks carry nothing but instants -- the slices seen above are all
-on the main thread track. (Anything else would nest: slices on one track have
-stack semantics, and unrelated spans of the same kind overlap freely.)
+The graph tracks only carry instant events.
 
   $ graph_slice_count() {
   >   awk '
@@ -113,27 +104,19 @@ stack semantics, and unrelated spans of the same kind overlap freely.)
   $ graph_slice_count
   0
 
-`copy.txt` depends on `/etc/hosts`, a path outside the workspace entirely
-rather than a project source file (which would resolve through dune's
-implicit copy-to-build-dir rule, i.e. the "rule" outcome, not this one) --
-so its build-dep resolves as `is-source`, the other collapsed case besides
-an exec-rule cache hit, producing a single `build-dep-resolved` instant
-instead of a start/finish pair. The resolution itself is not on the instant
--- the collapse is the only trace of it here, and the blob records it as `s`
-(asserted below):
+`copy.txt` depends on `/etc/hosts`, an external path rather than a project
+source file (which would resolve through dune's implicit copy-to-build-dir
+rule, i.e. the "rule" outcome, not this one) -- so its build-dep resolves as
+`is-source`, collapsing to a single `build-dep-resolved` instant instead of
+a start/finish pair.
 
   $ grep -q 'name: "build-dep-resolved"' dump.textpb && echo yes
   yes
   $ grep -q 'str: "is-source"' dump.textpb && echo yes
   [1]
 
-An executed rule's action execution is its own span (exec-rule-action,
-sharing the rule's async_id in the csexp), and gets a lifecycle pair like the
-other kinds.
-It is not bounded by -j -- the throttle is acquired per-process, below this
-span -- so an arbitrary number of actions can be open at once, and instants
-are what lets them all share one track (see doc/dev/trace-graph-perfetto.md,
-phase 6).
+An executed rule's action execution also gets a lifecycle pair.
+It is not bounded by -j; an arbitrary number of actions can be open at once.
 
 Names and annotation names are both interned, in separate tables, and a name
 is defined by its first user (i.e. after the event referencing it), so
@@ -166,11 +149,8 @@ own name, 8 for a `dune` dict entry (6 is the dict itself):
   >   ' dump.textpb
   > }
 
-An instant carries only what the blob cannot supply: the id keying its blob
-record, and (on a finish or a collapsed instant) `dur_ns`, which is timing
-rather than structure. So the action instants are joined to their rule by
-`rule_id`, and the rule's outcome and the dep's resolution -- both blob
-fields -- are not repeated here:
+Lifecycle instants carry minimal data: the id keying its blob record, and
+(on a finish or a collapsed instant) `dur_ns`.
 
   $ event_args | sort -u | grep '^exec-rule'
   exec-rule-action-finish TYPE_INSTANT rule_id,dur_ns
