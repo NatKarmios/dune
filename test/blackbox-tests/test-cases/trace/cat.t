@@ -3,6 +3,7 @@ dune trace cat can be used to view the trace:
   $ make_dune_project 3.21
   $ dune build
   $ dune trace cat | jq -c -s 'map(keys) | unique[]'
+  ["args","async_id","async_phase","cat","name","ts"]
   ["args","cat","dur","name","ts"]
   ["args","cat","name","ts"]
 
@@ -46,6 +47,32 @@ All the event types from chrome and field per type:
         "args",
         "cat",
         "dur",
+        "name",
+        "ph",
+        "pid",
+        "tid",
+        "ts"
+      ]
+    },
+    {
+      "value": "b",
+      "representative": [
+        "args",
+        "cat",
+        "id",
+        "name",
+        "ph",
+        "pid",
+        "tid",
+        "ts"
+      ]
+    },
+    {
+      "value": "e",
+      "representative": [
+        "args",
+        "cat",
+        "id",
         "name",
         "ph",
         "pid",

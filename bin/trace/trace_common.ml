@@ -106,6 +106,36 @@ module Event_sexp = struct
   ;;
 end
 
+(* Identifies one async span. [async_id] counts spans within a single dune
+   invocation, and a nested dune's events are folded into the same stream
+   tagged with its action digest, so it takes both to tell spans apart. *)
+module Span_id = struct
+  type t =
+    { digest : string option
+    ; async_id : int
+    }
+
+  let make ~digest ~async_id = { digest; async_id }
+
+  let equal a b =
+    Int.equal a.async_id b.async_id && Option.equal String.equal a.digest b.digest
+  ;;
+
+  let hash { digest; async_id } = Poly.hash (digest, async_id)
+
+  let to_dyn { digest; async_id } =
+    Dyn.record [ "digest", Dyn.option Dyn.string digest; "async_id", Dyn.int async_id ]
+  ;;
+
+  (* Spans are numbered in the order they begin, so ordering by [async_id]
+     puts a single invocation's spans in trace order. *)
+  let compare a b =
+    match Int.compare a.async_id b.async_id with
+    | Eq -> Option.compare String.compare a.digest b.digest
+    | ne -> ne
+  ;;
+end
+
 let term =
   let+ debug_backtraces =
     Arg.(

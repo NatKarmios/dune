@@ -28,6 +28,22 @@ module Event_sexp : sig
   val to_async_args : Sexp.t list -> string option * int option * Sexp.t list
 end
 
+(** Identifies one async span, pairing a begin event with its end. An
+    "async_id" alone does not: it counts spans within a single dune
+    invocation, and a nested dune's events are folded into the same stream
+    tagged with its action digest. *)
+module Span_id : sig
+  type t
+
+  val make : digest:string option -> async_id:int -> t
+
+  (** Orders spans by their "async_id", i.e. in the order they begin within
+      one invocation. For output that has to be deterministic. *)
+  val compare : t -> t -> Ordering.t
+
+  include Table.Key with type t := t
+end
+
 (** The command line shared by every [dune trace] subcommand: [--trace-file],
     resolved to the default trace file when absent, and [--debug-backtraces],
     which the term applies as it parses. *)

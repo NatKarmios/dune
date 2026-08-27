@@ -12,7 +12,7 @@ option explicitly.
   $ cat > melc_dirs.jq <<EOF
   > select(
   >   .cat == "process"
-  >   and .name == "start"
+  >   and .async_phase == "begin"
   >   and (.args.prog | test("/melc$"))
   >   and (.args.process_args[0]? != "--where")
   > )

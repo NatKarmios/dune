@@ -633,6 +633,11 @@ Implementation notes / deviations from the schema as originally drafted:
 - `graph-events.t`'s prose claimed the action span is "bounded by -j"; that
   was the phase 3 misreading this phase corrects, so it is fixed there too
   (the dune-side events themselves are unchanged).
+- Process spans, which became async begin/end pairs later, *do* get a slot
+  pool in the converter (`job-N` tracks under a `processes` track). That is
+  not a relapse into phase 3: `with_job_slot` bounds process concurrency by
+  `-j`, which is precisely the bound this phase found action spans to lack --
+  their peak being the ready set, measured above this hook.
 
 ### Phase 7 — instants carry ids only (converter-only) — **implemented**
 

@@ -91,8 +91,8 @@ Partial output from timed-out commands should still be sanitized.
 Timeouts should not be cached as successful cram output.
 
   $ cram_process_trace () {
-  >   dune trace cat | jq_dune \
-  >     'processes | select(.args.categories == ["cram"]) | .args | {error,name}'
+  >   dune trace cat | jq_dune -s \
+  >     'processSpans | select(.args.categories == ["cram"]) | .args | {error,name}'
   > }
 
   $ cat > test.t <<EOF

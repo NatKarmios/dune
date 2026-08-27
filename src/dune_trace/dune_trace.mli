@@ -44,6 +44,20 @@ module Event : sig
 
   val gen_async_id : unit -> async_id
 
+  (** What forced the build a span belongs to. Recorded on graph spans and on
+      process spans alike. *)
+  module Forced_by : sig
+    type t =
+      | Forced_by_rule of int
+      | Forced_by_dep_recovery of int
+      | Forced_by_dep of string
+      | Forced_by_dynamic_includes of Path.Source.t
+      | Forced_by_gen_rules of Path.Build.t
+      | Forced_by_pform of Path.Source.t
+      | Forced_by_configurator
+      | Forced_by_request
+  end
+
   val sandbox
     :  [ `Create | `Snapshot | `Destroy | `Extract | `Corrected ]
     -> start:Time.t
@@ -69,35 +83,37 @@ module Event : sig
     ; dirs : Filename.Set.t
     }
 
-  val process_start
-    :  extra_args:(string * Sexp.t) list
-    -> pid:Pid.t
-    -> dir:Path.t option
-    -> prog:string
-    -> args:string list
-    -> timeout:Time.Span.t option
-    -> started_at:Time.t
-    -> name:string option
-    -> categories:string list
-    -> targets:targets option
-    -> queued:Time.Span.t
-    -> t
+  (** A spawned process, as a single async span. The two ends share an
+      [async_id] and repeat none of each other's fields. *)
+  module Process : sig
+    (** Emitted at [started_at], carrying everything known at spawn time. *)
+    val start
+      :  extra_args:(string * Sexp.t) list
+      -> async_id:async_id
+      -> forced_by:Forced_by.t option
+      -> pid:Pid.t
+      -> dir:Path.t option
+      -> prog:string
+      -> args:string list
+      -> timeout:Time.Span.t option
+      -> started_at:Time.t
+      -> name:string option
+      -> categories:string list
+      -> targets:targets option
+      -> queued:Time.Span.t
+      -> t
 
-  val process
-    :  extra_args:(string * Sexp.t) list
-    -> name:string option
-    -> started_at:Time.t
-    -> targets:targets option
-    -> categories:string list
-    -> pid:Pid.t
-    -> exit:Exit_status.t
-    -> prog:string
-    -> process_args:string list
-    -> dir:Path.t option
-    -> stdout:string
-    -> stderr:string
-    -> times:Proc.Times.t
-    -> t
+    (** [stop] must be the process's own end time, not the time of the call,
+        so that the span covers exactly the process's lifetime. *)
+    val finish
+      :  async_id:async_id
+      -> stop:Time.t
+      -> exit:Exit_status.t
+      -> stdout:string
+      -> stderr:string
+      -> resource_usage:Proc.Resource_usage.t option
+      -> t
+  end
 
   val unknown_process : Proc.Process_info.t -> t
 
@@ -286,18 +302,6 @@ module Event : sig
   val artifact_substitution : file:Path.t -> placeholder:Dyn.t -> value:string -> t
 
   module Graph : sig
-    module Forced_by : sig
-      type t =
-        | Forced_by_rule of int
-        | Forced_by_dep_recovery of int
-        | Forced_by_dep of string
-        | Forced_by_dynamic_includes of Path.Source.t
-        | Forced_by_gen_rules of Path.Build.t
-        | Forced_by_pform of Path.Source.t
-        | Forced_by_configurator
-        | Forced_by_request
-    end
-
     module Build_dep : sig
       module Outcome : sig
         type t =

@@ -27,12 +27,6 @@ We compile a first time...
     "_build/.actions/default/<action>"
   ]
   [
-    "_build/.actions/default/<action>"
-  ]
-  [
-    "_build/default/cstub.o"
-  ]
-  [
     "_build/default/cstub.o"
   ]
 
@@ -41,9 +35,6 @@ And check that we recompile the stub after modifying a Caml header file.
   $ touch _caml/caml/new-header.h
   $ dune build _build/default/cstub.o
   $ dune trace cat | jq 'include "dune"; traceTargetFilesRedacted'
-  [
-    "_build/default/cstub.o"
-  ]
   [
     "_build/default/cstub.o"
   ]

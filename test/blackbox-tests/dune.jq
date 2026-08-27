@@ -23,7 +23,16 @@ def redactAnonymousActionPath:
 def traceTargetFilesRedacted:
   (.args.target_files | values) | map(redactAnonymousActionPath);
 
-def processes: select(.cat == "process" and .name == "finish");
+# A process's span begins with the command that ran and ends with the outcome
+# of running it. Most filters only want the command, so `processes` is the
+# begin; `processSpans` merges the two ends for the filters that need both.
+def processes: select(.cat == "process" and .async_phase == "begin");
+
+def processSpans:
+    [ .[] | select(.cat == "process" and .async_id != null) ]
+  | group_by([(.args.digest // ""), .async_id])
+  | map({ cat: "process", name: "process", args: (map(.args) | add) })
+  | .[];
 
 def targetsMatchingFilter(f):
     processes
@@ -333,7 +342,7 @@ def runnerRequestEvents:
   ];
 
 def processStartEvents:
-  .[] | select(.cat == "process" and .name == "start");
+  .[] | processes;
 
 def processHasArg($arg):
   (.args.process_args // []) | index($arg);
@@ -366,30 +375,28 @@ def runnerEventCount($name):
 
 def actionRunnerTraceEventRank:
   if .cat == "action" then runnerEventRank
-  elif .cat == "process" and .name == "start" then 10
-  elif .cat == "process" and .name == "finish" then 11
+  elif .cat == "process" then 10
   else 12
   end;
 
 def actionRunnerTraceEvents($runner_name):
-  [ .[]
-  | select(.args.action_runner? == $runner_name)
-  | select(
-      (.cat == "action" and (.name | startswith("runner-")))
-      or (.cat == "process" and (.name == "start" or .name == "finish")))
-  | if .cat == "action" then
-      runnerEvent
-    else
-      { cat
+  [ ( .[]
+    | select(.args.action_runner? == $runner_name)
+    | select(.cat == "action" and (.name | startswith("runner-")))
+    | runnerEvent
+    )
+  , ( processSpans
+    | select(.args.action_runner? == $runner_name)
+    | { cat
       , name
       , args:
-          ({ action_runner: .args.action_runner
-           , action_runner_pid: (.args.action_runner_pid | type)
-           , prog: (.args.prog | basename)
-           }
-           + (if .name == "finish" then { exit: .args.exit } else {} end))
+          { action_runner: .args.action_runner
+          , action_runner_pid: (.args.action_runner_pid | type)
+          , prog: (.args.prog | basename)
+          , exit: .args.exit
+          }
       }
-    end
+    )
   ] | sort_by(actionRunnerTraceEventRank, .cat, .name, (.args.prog // ""));
 
 def lastRunnerSpawnPid:

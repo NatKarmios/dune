@@ -24,14 +24,11 @@ let dep_to_string (dep : Dep.t) =
   | Universe -> "universe"
 ;;
 
+(* Extends the top-level [Forced_by] with the constructors that need a rule
+   or a dep to name the forcer. *)
 module Forced_by = struct
-  include Graph.Forced_by
+  include Forced_by
 
-  (* The forcer of the current dynamic context: each scope sets it while
-     running its body, and the span events record it. *)
-  let var = Fiber.Var.create (None : t option)
-  let set ~new_forcer f x = Fiber.Var.set var (Some new_forcer) (fun () -> Memo.run (f x))
-  let get = Fiber.Var.get var
   let rule ~rule:{ Rule.id; _ } = Forced_by_rule (Rule.Id.to_int id)
   let dep_recovery ~rule:{ Rule.id; _ } = Forced_by_dep_recovery (Rule.Id.to_int id)
   let dep ~dep = Forced_by_dep (dep_to_string dep)

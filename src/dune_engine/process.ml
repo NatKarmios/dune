@@ -824,36 +824,36 @@ let targets_of_purpose (purpose : Process_metadata.purpose) =
   | Build_job (Some { dirs; files; root }) -> Some { Dune_trace.Event.root; dirs; files }
 ;;
 
+(* Whether [spawn] emits the begin of the process's span. The local path does;
+   the action-runner path cannot, as it only learns the process's start time
+   from the response, so the parent emits both ends of the span at once. *)
+type trace =
+  | No_trace
+  | Trace of
+      { async_id : Dune_trace.Event.async_id
+      ; forced_by : Forced_by.t option
+      }
+
+(* The span's end. [stop] is the process's own end time rather than the time of
+   this call, so the span covers exactly the process's lifetime -- as the
+   [dur] of the single event this replaced used to. Everything already on the
+   begin is left off. *)
 let report_process_finished
-      ?(extra_args = [])
-      ~metadata
-      ~dir
-      ~prog
-      ~pid
-      ~args
+      ~async_id
       ~started_at
       ~exit_status
       ~stdout
       ~stderr
-      (times : Proc.Times.t)
+      ({ elapsed_time; resource_usage } : Proc.Times.t)
   =
   Dune_trace.emit Process (fun () ->
-    let stdout = Result.Out.get stdout in
-    let stderr = Result.Out.get stderr in
-    Dune_trace.Event.process
-      ~extra_args
-      ~name:metadata.Process_metadata.name
-      ~started_at
-      ~targets:(targets_of_purpose metadata.purpose)
-      ~categories:metadata.Process_metadata.categories
-      ~pid
+    Dune_trace.Event.Process.finish
+      ~async_id
+      ~stop:(Time.add started_at elapsed_time)
       ~exit:exit_status
-      ~prog
-      ~process_args:args
-      ~dir
-      ~stdout
-      ~stderr
-      ~(times : Proc.Times.t))
+      ~stdout:(Result.Out.get stdout)
+      ~stderr:(Result.Out.get stderr)
+      ~resource_usage)
 ;;
 
 type prepared_outputs =
@@ -930,7 +930,7 @@ let await ?cancellation ~timeout { response_file; pid; is_process_group_leader; 
 let spawn
       ?dir
       ?(env = Env.initial)
-      ?(emit_trace = true)
+      ~trace
       ~(prepared_outputs : prepared_outputs)
       ~(stdin : _ Io.t)
       ~queued
@@ -1004,21 +1004,24 @@ let spawn
          | None -> Inherit
          | Some dir -> Path (Path.to_string dir))
   in
-  if emit_trace
-  then
-    Dune_trace.emit Process (fun () ->
-      Dune_trace.Event.process_start
-        ~extra_args:[]
-        ~targets:(targets_of_purpose metadata.purpose)
-        ~pid
-        ~dir
-        ~prog:prog_str
-        ~args
-        ~timeout
-        ~name:metadata.Process_metadata.name
-        ~categories:metadata.Process_metadata.categories
-        ~started_at
-        ~queued);
+  (match trace with
+   | No_trace -> ()
+   | Trace { async_id; forced_by } ->
+     Dune_trace.emit Process (fun () ->
+       Dune_trace.Event.Process.start
+         ~extra_args:[]
+         ~async_id
+         ~forced_by
+         ~targets:(targets_of_purpose metadata.purpose)
+         ~pid
+         ~dir
+         ~prog:prog_str
+         ~args
+         ~timeout
+         ~name:metadata.Process_metadata.name
+         ~categories:metadata.Process_metadata.categories
+         ~started_at
+         ~queued));
   Io.release stdout;
   Io.release stderr;
   { started_at
@@ -1161,7 +1164,7 @@ let exec_locally
          spawn
            ?dir
            ~env
-           ~emit_trace:false
+           ~trace:No_trace
            ~prepared_outputs
            ~stdin
            ~queued
@@ -1216,6 +1219,13 @@ let run_internal
   in
   Scheduler.with_job_slot ?cancellation (fun () ->
     let queued = Time.diff (Time.now ()) start in
+    (* The span pairing the process's begin and end, and the forcer to record
+       on the begin. Both branches below need them, and reading the forcer
+       needs the fiber context we are in here. *)
+    let async_id = Dune_trace.Event.gen_async_id () in
+    let* forced_by =
+      if Dune_trace.enabled Process then Forced_by.get else Fiber.return None
+    in
     let dir =
       match dir with
       | None -> dir
@@ -1251,6 +1261,7 @@ let run_internal
         spawn
           ?dir
           ~env
+          ~trace:(Trace { async_id; forced_by })
           ~prepared_outputs
           ~stdin:stdin_from
           ~queued
@@ -1352,45 +1363,37 @@ let run_internal
         ~user_cpu_time
         ~system_cpu_time);
     let result = Result.make t process_info fail_mode in
-    (match remote_started_at with
-     | None ->
-       report_process_finished
-         ~metadata
-         ~dir
-         ~prog:prog_str
-         ~pid:t.pid
-         ~args
-         ~started_at:t.started_at
-         ~exit_status:result.exit_status
-         ~stdout:result.stdout
-         ~stderr:result.stderr
-         times
-     | Some started_at ->
-       Dune_trace.emit Process (fun () ->
-         Dune_trace.Event.process_start
-           ~extra_args:trace_args
-           ~targets:(targets_of_purpose metadata.purpose)
-           ~pid:process_info.pid
-           ~dir
-           ~prog:prog_str
-           ~args
-           ~timeout
-           ~name:metadata.Process_metadata.name
-           ~categories:metadata.Process_metadata.categories
-           ~started_at
-           ~queued);
-       report_process_finished
-         ~extra_args:trace_args
-         ~metadata
-         ~dir
-         ~prog:prog_str
-         ~pid:process_info.pid
-         ~args
-         ~started_at
-         ~exit_status:result.exit_status
-         ~stdout:result.stdout
-         ~stderr:result.stderr
-         times);
+    let started_at =
+      match remote_started_at with
+      | None -> t.started_at
+      | Some started_at ->
+        (* [spawn] ran in the action runner, so the begin was not emitted
+           there; emit it here, now that the response has told us when the
+           process started. *)
+        Dune_trace.emit Process (fun () ->
+          Dune_trace.Event.Process.start
+            ~extra_args:trace_args
+            ~async_id
+            ~forced_by
+            ~targets:(targets_of_purpose metadata.purpose)
+            ~pid:process_info.pid
+            ~dir
+            ~prog:prog_str
+            ~args
+            ~timeout
+            ~name:metadata.Process_metadata.name
+            ~categories:metadata.Process_metadata.categories
+            ~started_at
+            ~queued);
+        started_at
+    in
+    report_process_finished
+      ~async_id
+      ~started_at
+      ~exit_status:result.exit_status
+      ~stdout:result.stdout
+      ~stderr:result.stderr
+      times;
     Fiber.return
       (match termination_reason with
        | Cancel ->

@@ -20,8 +20,8 @@ Test the (dialect ...) stanza inside the `dune-project` file.
   \ No newline at end of file
   [1]
 
-  $ dune trace cat | jq_dune -r '
-  >   processes
+  $ dune trace cat | jq_dune -sr '
+  >   processSpans
   > | select(.args.prog | basename == "ocamlformat")
   > | .args.stderr
   > | gsub("^\\s+|\\s+$"; "")

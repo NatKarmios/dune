@@ -22,7 +22,11 @@ build graph data.
   >  (action (copy /etc/hosts copy.txt)))
   > EOF
 
-  $ DUNE_TRACE=+graph dune build out.txt copy.txt
+Processes get a track each while they are running, so `-j 1` pins how many of
+those tracks the build needs (see the "job-N" section below) and with it the
+total track count asserted further down.
+
+  $ DUNE_TRACE=+graph dune build -j 1 out.txt copy.txt
 
 The `--text` flag emits a human-readable, protobuf-text-format-style dump.
 Cram runs commands under pipefail, and the dump is large enough that a
@@ -43,20 +47,36 @@ A single process track named "dune" holds a "main" thread track:
   $ grep -c 'thread_name: "main"' dump.textpb
   1
 
-Flat events with a duration (e.g. spawned processes) still become slices
-(begin/end pairs) on the main thread track:
+Flat events with a duration (e.g. sandbox creation, a persistent file load)
+still become slices (begin/end pairs) on the main thread track:
 
   $ grep -q 'type: TYPE_SLICE_BEGIN' dump.textpb && echo yes
   yes
   $ grep -q 'type: TYPE_SLICE_END' dump.textpb && echo yes
   yes
 
+Spawned processes are slices too, but on their own pool of tracks rather than
+the main thread: slices on one perfetto track have to nest and parallel
+processes do not, so each concurrent process takes a "job-N" track of its own,
+under a "processes" track. A slot is reused once the process on it has
+finished, so the pool is as wide as the build's concurrency -- one track, at
+`-j 1` -- however many processes the build runs.
+
+  $ grep -c 'name: "processes"' dump.textpb
+  1
+  $ grep -c 'name: "job-' dump.textpb
+  1
+
 Graph async spans (exec-rule, exec-rule-action, build-dep, gen-rules,
 dynamic-includes) become instants instead, as overlapping durations do not
 visually scale well.
 
+Nine tracks in total: the process, the main thread, the graph blob, the four
+graph kinds this project exercises (no subdirectory means no
+dynamic-includes), the "processes" track, and its single job track.
+
   $ grep -c 'track_descriptor {' dump.textpb
-  7
+  9
   $ grep -q 'name: "exec-rule"' dump.textpb && echo yes
   yes
   $ grep -c 'name: "exec-rule-action"' dump.textpb
@@ -276,7 +296,7 @@ is a plain path in the event, not an interned id, and stays one:
   [1]
 
 Per the arg-slimming in doc/dev/trace-graph-perfetto.md (phases 2 and 7),
-`deps`, `dyn_deps`, `target_files`, `target_dirs`, `forced_by`, and expansion
+`deps`, `dyn_deps`, `target_files`, `target_dirs`, and expansion
 lists no longer appear on instants at all -- they are blob-only now (see
 below). In particular, "out.txt" (a `target_files` entry) no longer appears
 anywhere in the plain protobuf text as its own interned string; it only shows
@@ -292,12 +312,18 @@ real paths in the event, not intern ids, and are not part of the graph:
   [1]
   $ grep -q 'name: "dyn_deps"' dump.textpb && echo yes
   [1]
-  $ grep -q 'name: "forced_by"' dump.textpb && echo yes
-  [1]
   $ grep -q 'str: "out.txt"' dump.textpb && echo yes
   [1]
   $ grep -c 'str: "_build/default/out.txt"' dump.textpb
   1
+
+`forced_by` is blob-only for graph spans too, but it does reach the trace on
+process slices, which have no blob to defer to. It is a `dune` dict entry
+there, surfacing as `debug.dune.forced_by`, and its parts are joined into one
+phrase rather than indexed as an array:
+
+  $ event_args | sort -u | grep '^process '
+  process TYPE_SLICE_BEGIN process_args,forced_by
 
 Recognised structural fields are grouped under a "dune" dict (surfacing as e.g.
 `debug.dune.dir` in Trace Processor), while unrecognised fields (such as the
@@ -734,3 +760,25 @@ not distinguish from having none:
 
   $ decode_section graph-rules | grep "^[0-9]*~$dir_id~$reads_id~~D~" | cut -d~ -f7
   ?
+
+The job-track pool widens only as far as the concurrency actually reached. Two
+rules with nothing between them, run two at a time, overlap, so the second
+process cannot reuse the first's track:
+
+  $ cat >dune <<EOF
+  > (rule
+  >  (target slow-a.txt)
+  >  (action (with-stdout-to slow-a.txt (bash "sleep 1"))))
+  > (rule
+  >  (target slow-b.txt)
+  >  (action (with-stdout-to slow-b.txt (bash "sleep 1"))))
+  > EOF
+  $ dune build -j 2 slow-a.txt slow-b.txt
+  $ dune trace perfetto --text > dump.textpb
+  $ grep -c 'name: "job-' dump.textpb
+  2
+
+One slice each, named for the event rather than the command it ran:
+
+  $ grep -c 'name: "process"' dump.textpb
+  2

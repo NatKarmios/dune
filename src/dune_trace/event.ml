@@ -144,6 +144,119 @@ end
 
 type t = Event.t
 
+(* To reduce trace size, strings in Graph events are interned via an instant
+   event before use. *)
+module Intern = struct
+  type t =
+    { ids : int String.Table.t
+    ; mutable next : int
+    }
+
+  let tbl = { ids = String.Table.create 1024; next = 0 }
+
+  let get key =
+    match String.Table.find tbl.ids key with
+    | Some id -> id, `Existing
+    | None ->
+      let id = tbl.next in
+      tbl.next <- id + 1;
+      String.Table.set tbl.ids key id;
+      id, `New
+  ;;
+
+  let mk_event ~ts entries =
+    let entries =
+      List.map entries ~f:(fun (id, value) ->
+        Arg.record [ "id", Arg.int id; "value", Arg.string value ] |> Arg.list)
+    in
+    Event.instant ~args:[ "entries", Arg.list entries ] ~name:"intern" ts Graph
+  ;;
+
+  let strings ~ts strings =
+    let new_entries = ref [] in
+    let ids =
+      List.map strings ~f:(fun s ->
+        let id, freshness = get s in
+        (match freshness with
+         | `New -> new_entries := (id, s) :: !new_entries
+         | `Existing -> ());
+        id)
+    in
+    let intern_events =
+      match List.rev !new_entries with
+      | [] -> []
+      | entries -> [ mk_event ~ts entries ]
+    in
+    intern_events, ids
+  ;;
+
+  let string ~ts s =
+    let id, freshness = get s in
+    let events =
+      match freshness with
+      | `New -> [ mk_event ~ts [ id, s ] ]
+      | `Existing -> []
+    in
+    events, id
+  ;;
+end
+
+module Forced_by = struct
+  type t =
+    | Forced_by_rule of int
+    | Forced_by_dep_recovery of int
+    | Forced_by_dep of string
+    | Forced_by_dynamic_includes of Path.Source.t
+    | Forced_by_gen_rules of Path.Build.t
+    | Forced_by_pform of Path.Source.t
+    | Forced_by_configurator
+    | Forced_by_request
+
+  (* The tag identifying the kind of forcer, and the strings it carries, kept
+     apart so that the interned and the plain rendering below can share
+     them. *)
+  let split = function
+    | Forced_by_rule id -> `Rule id, []
+    | Forced_by_dep_recovery id -> `Dep_recovery id, []
+    | Forced_by_dep dep -> `Paths "dep", [ dep ]
+    | Forced_by_dynamic_includes path ->
+      `Paths "dynamic-includes", [ Path.Source.to_string path ]
+    | Forced_by_gen_rules dir -> `Paths "gen-rules", [ Path.Build.to_string dir ]
+    | Forced_by_pform dune_file -> `Paths "pform", [ Path.Source.to_string dune_file ]
+    | Forced_by_configurator -> `Paths "configurator", []
+    | Forced_by_request -> `Paths "request", []
+  ;;
+
+  (* [items] renders the strings of a `Paths` forcer; the other tags carry
+     none. *)
+  let parts tag items =
+    match tag with
+    | `Rule id -> [ Arg.string "rule"; Arg.int id ]
+    | `Dep_recovery id -> [ Arg.string "dep-recovery"; Arg.int id ]
+    | `Paths name -> Arg.string name :: items
+  ;;
+
+  (* For graph events: strings go through the intern table, and the key is
+     emitted even with no forcer. *)
+  let args ~ts = function
+    | None -> [], [ "forced_by", Arg.list [] ]
+    | Some forced_by ->
+      let tag, strings = split forced_by in
+      let intern_events, ids = Intern.strings ~ts strings in
+      intern_events, [ "forced_by", Arg.list (parts tag (List.map ids ~f:Arg.int)) ]
+  ;;
+
+  (* For process events, which do not use the intern table: the common forcer
+     is a rule, carrying no string at all, so interning would buy nothing.
+     With no forcer the key is omitted rather than emitted empty. *)
+  let plain_args = function
+    | None -> []
+    | Some forced_by ->
+      let tag, strings = split forced_by in
+      [ "forced_by", Arg.list (parts tag (List.map strings ~f:Arg.string)) ]
+  ;;
+end
+
 type alloc_source =
   { source : string
   ; estimated_words : int
@@ -449,97 +562,74 @@ let make_exit exit =
     ]
 ;;
 
-let process_start
-      ~extra_args
-      ~pid
-      ~dir
-      ~prog
-      ~args
-      ~timeout
-      ~started_at
-      ~name
-      ~categories
-      ~targets
-      ~queued
-  =
-  let args =
-    let always =
-      [ "process_args", Arg.list (List.map args ~f:Arg.string)
-      ; "pid", Arg.int (Pid.to_int pid)
-      ; "categories", Arg.list (List.map categories ~f:Arg.string)
-      ; "queued", Arg.span queued
-      ]
-    in
-    let extended =
-      List.concat
-        [ [ "prog", Arg.string prog
-          ; "dir", Arg.path (Option.value dir ~default:Path.root)
-          ]
-        ; (match targets with
-           | None -> []
-           | Some targets -> args_of_targets targets)
-        ; (match name with
-           | None -> []
-           | Some name -> [ "name", Arg.string name ])
-        ; (match timeout with
-           | None -> []
-           | Some timeout -> [ "timeout", Arg.span timeout ])
+(* A spawned process is one async span: the begin carries everything known
+   at spawn time, the end everything the process's exit reports. Nothing is
+   repeated across the two -- the [async_id] is what pairs them. *)
+module Process = struct
+  let start
+        ~extra_args
+        ~async_id
+        ~forced_by
+        ~pid
+        ~dir
+        ~prog
+        ~args
+        ~timeout
+        ~started_at
+        ~name
+        ~categories
+        ~targets
+        ~queued
+    =
+    let args =
+      let always =
+        [ "process_args", Arg.list (List.map args ~f:Arg.string)
+        ; "pid", Arg.int (Pid.to_int pid)
+        ; "categories", Arg.list (List.map categories ~f:Arg.string)
+        ; "queued", Arg.span queued
         ]
+      in
+      let extended =
+        List.concat
+          [ [ "prog", Arg.string prog
+            ; "dir", Arg.path (Option.value dir ~default:Path.root)
+            ]
+          ; (match targets with
+             | None -> []
+             | Some targets -> args_of_targets targets)
+          ; (match name with
+             | None -> []
+             | Some name -> [ "name", Arg.string name ])
+          ; (match timeout with
+             | None -> []
+             | Some timeout -> [ "timeout", Arg.span timeout ])
+          ; Forced_by.plain_args forced_by
+          ]
+      in
+      always @ extended @ extra_args
     in
-    always @ extended @ extra_args
-  in
-  Event.instant ~args ~name:"start" started_at Process
-;;
+    Event.async_begin ~args ~async_id ~name:"process" started_at Process
+  ;;
 
-let process
-      ~extra_args
-      ~name
-      ~started_at
-      ~targets
-      ~categories
-      ~pid
-      ~exit
-      ~prog
-      ~process_args
-      ~dir
-      ~stdout
-      ~stderr
-      ~times:{ Proc.Times.elapsed_time; resource_usage }
-  =
-  let args =
-    let always =
-      [ "process_args", Arg.list (List.map process_args ~f:Arg.string)
-      ; "pid", Arg.int (Pid.to_int pid)
-      ; "categories", Arg.list (List.map categories ~f:Arg.string)
-      ]
-    in
-    let extended =
-      let exit = make_exit exit in
+  (* [stop] is the process's own end time rather than now, so that the span
+     covers exactly the process's lifetime. *)
+  let finish ~async_id ~stop ~exit ~stdout ~stderr ~resource_usage =
+    let args =
       let output name s =
         match s with
         | "" -> []
         | s -> [ name, Arg.string s ]
       in
       List.concat
-        [ [ "prog", Arg.string prog
-          ; "dir", Arg.path (Option.value dir ~default:Path.root)
-          ]
-        ; exit
-        ; (match targets with
-           | None -> []
-           | Some targets -> args_of_targets targets)
+        [ make_exit exit
         ; output "stdout" stdout
         ; output "stderr" stderr
-        ; (match name with
-           | None -> []
-           | Some name -> [ "name", Arg.string name ])
+        ; make_rusage_args resource_usage
         ]
     in
-    let resource_usage = make_rusage_args resource_usage in
-    always @ extended @ resource_usage @ extra_args
-  in
-  Event.complete ~args ~start:started_at ~dur:elapsed_time ~name:"finish" Process
-;;
+    Event.async_end ~args ~async_id ~name:"process" stop Process
+  ;;
+end
 
 let unknown_process { Proc.Process_info.pid; status; end_time; resource_usage } =
   let now = Time.now () in
@@ -1034,106 +1124,11 @@ let runtime_counter time name value =
 ;;
 
 module Graph = struct
-  (* To reduce trace size, strings in Graph events are interned via an instant
-     event before use. *)
-  module Intern = struct
-    type t =
-      { ids : int String.Table.t
-      ; mutable next : int
-      }
-
-    let tbl = { ids = String.Table.create 1024; next = 0 }
-
-    let get key =
-      match String.Table.find tbl.ids key with
-      | Some id -> id, `Existing
-      | None ->
-        let id = tbl.next in
-        tbl.next <- id + 1;
-        String.Table.set tbl.ids key id;
-        id, `New
-    ;;
-
-    let mk_event ~ts entries =
-      let entries =
-        List.map entries ~f:(fun (id, value) ->
-          Arg.record [ "id", Arg.int id; "value", Arg.string value ] |> Arg.list)
-      in
-      Event.instant ~args:[ "entries", Arg.list entries ] ~name:"intern" ts Graph
-    ;;
-
-    let strings ~ts strings =
-      let new_entries = ref [] in
-      let ids =
-        List.map strings ~f:(fun s ->
-          let id, freshness = get s in
-          (match freshness with
-           | `New -> new_entries := (id, s) :: !new_entries
-           | `Existing -> ());
-          id)
-      in
-      let intern_events =
-        match List.rev !new_entries with
-        | [] -> []
-        | entries -> [ mk_event ~ts entries ]
-      in
-      intern_events, ids
-    ;;
-
-    let string ~ts s =
-      let id, freshness = get s in
-      let events =
-        match freshness with
-        | `New -> [ mk_event ~ts [ id, s ] ]
-        | `Existing -> []
-      in
-      events, id
-    ;;
-  end
-
   let ids_arg key ids =
     match ids with
     | [] -> []
     | _ :: _ -> [ key, Arg.list (List.map ids ~f:Arg.int) ]
   ;;
-
-  module Forced_by = struct
-    type t =
-      | Forced_by_rule of int
-      | Forced_by_dep_recovery of int
-      | Forced_by_dep of string
-      | Forced_by_dynamic_includes of Path.Source.t
-      | Forced_by_gen_rules of Path.Build.t
-      | Forced_by_pform of Path.Source.t
-      | Forced_by_configurator
-      | Forced_by_request
-
-    let args ~ts = function
-      | None -> [], [ "forced_by", Arg.list [] ]
-      | Some forced_by ->
-        let tag, strings =
-          match forced_by with
-          | Forced_by_rule id -> `Rule id, []
-          | Forced_by_dep_recovery id -> `Dep_recovery id, []
-          | Forced_by_dep dep -> `Paths "dep", [ dep ]
-          | Forced_by_dynamic_includes path ->
-            `Paths "dynamic-includes", [ Path.Source.to_string path ]
-          | Forced_by_gen_rules dir -> `Paths "gen-rules", [ Path.Build.to_string dir ]
-          | Forced_by_pform dune_file ->
-            `Paths "pform", [ Path.Source.to_string dune_file ]
-          | Forced_by_configurator -> `Paths "configurator", []
-          | Forced_by_request -> `Paths "request", []
-        in
-        let intern_events, ids = Intern.strings ~ts strings in
-        let parts =
-          match tag with
-          | `Rule id -> [ Arg.string "rule"; Arg.int id ]
-          | `Dep_recovery id -> [ Arg.string "dep-recovery"; Arg.int id ]
-          | `Paths name -> Arg.string name :: List.map ids ~f:Arg.int
-        in
-        intern_events, [ "forced_by", Arg.list parts ]
-    ;;
-  end
 
   module Build_dep = struct
     module Outcome = struct

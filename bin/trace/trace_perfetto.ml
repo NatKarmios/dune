@@ -276,6 +276,7 @@ module Graph_blob = struct
 end
 
 module P = Dune_perfetto
+module Span_id = Trace_common.Span_id
 
 module Track_uuid = struct
   let process = 1
@@ -286,6 +287,10 @@ module Track_uuid = struct
   let gen_rules = 6
   let dynamic_includes = 7
   let exec_rule_action = 8
+  let processes = 9
+
+  (* Slot tracks are allocated as needed, so their uuids cannot be fixed. *)
+  let first_dynamic = 10
 end
 
 type rule_begin =
@@ -323,6 +328,25 @@ type action_begin =
   ; action_flow_ids : int list
   }
 
+(* One track holding process slices. Slices on a single perfetto track have to
+   nest, and processes running in parallel do not, so each concurrent process
+   gets a slot of its own; a slot is reused once the process on it has
+   finished. The pool is therefore as wide as the build's concurrency, not as
+   long as its process count. *)
+type process_slot =
+  { slot_uuid : int
+  ; slot_name : string
+  ; mutable slot_busy : bool
+  ; mutable slot_last_ts : int
+  }
+
+type process_begin =
+  { process_slot : process_slot
+  ; process_begin_ts : int
+  ; process_cat : string
+  ; process_fields : Sexp.t list
+  }
+
 type t =
   { mutable declared_process : bool
   ; declared_tracks : (int, unit) Table.t
@@ -331,11 +355,15 @@ type t =
   ; (* Timestamp (ns) of the last event seen, including [intern] events;
        used to place the graph blob's instants. *)
     mutable last_ts : int
-  ; open_rules : (int, rule_begin) Table.t
-  ; open_deps : (int, dep_begin) Table.t
-  ; open_gen_rules : (int, gen_rules_begin) Table.t
-  ; open_dynamic_includes : (int, dynamic_includes_begin) Table.t
-  ; open_actions : (int, action_begin) Table.t
+  ; open_rules : (Span_id.t, rule_begin) Table.t
+  ; open_deps : (Span_id.t, dep_begin) Table.t
+  ; open_gen_rules : (Span_id.t, gen_rules_begin) Table.t
+  ; open_dynamic_includes : (Span_id.t, dynamic_includes_begin) Table.t
+  ; open_actions : (Span_id.t, action_begin) Table.t
+  ; open_processes : (Span_id.t, process_begin) Table.t
+  ; (* Slots in allocation order, so a slot's position names its track. *)
+    mutable process_slots : process_slot list
+  ; mutable next_track_uuid : int
   ; mutable next_flow_id : int
   ; mutable rev_rule_lines : string list
   ; mutable rev_dep_lines : string list
@@ -348,11 +376,14 @@ let create () =
   ; interned_strings = Table.create (module Int) 2048
   ; rev_packets = []
   ; last_ts = 0
-  ; open_rules = Table.create (module Int) 256
-  ; open_deps = Table.create (module Int) 256
-  ; open_gen_rules = Table.create (module Int) 64
-  ; open_dynamic_includes = Table.create (module Int) 64
-  ; open_actions = Table.create (module Int) 64
+  ; open_rules = Table.create (module Span_id) 256
+  ; open_deps = Table.create (module Span_id) 256
+  ; open_gen_rules = Table.create (module Span_id) 64
+  ; open_dynamic_includes = Table.create (module Span_id) 64
+  ; open_actions = Table.create (module Span_id) 64
+  ; open_processes = Table.create (module Span_id) 64
+  ; process_slots = []
+  ; next_track_uuid = Track_uuid.first_dynamic
   ; next_flow_id = 1
   ; rev_rule_lines = []
   ; rev_dep_lines = []
@@ -366,6 +397,12 @@ let fresh_flow_id t =
   let id = t.next_flow_id in
   t.next_flow_id <- id + 1;
   id
+;;
+
+let fresh_track_uuid t =
+  let uuid = t.next_track_uuid in
+  t.next_track_uuid <- uuid + 1;
+  uuid
 ;;
 
 let field key rest =
@@ -392,16 +429,14 @@ let ensure_process t =
             ~name:"main")))
 ;;
 
-(* Declare the (fixed, per-kind) track [uuid] the first time anything is
+(* Declare the track [uuid] under [parent_uuid] the first time anything is
    pushed to it. *)
-let ensure_track t uuid ~name =
+let ensure_track t uuid ~parent_uuid ~name =
   match Table.find t.declared_tracks uuid with
   | Some () -> ()
   | None ->
     Table.set t.declared_tracks uuid ();
-    push
-      t
-      (P.Track_descriptor (P.Track.child ~uuid ~parent_uuid:Track_uuid.process ~name))
+    push t (P.Track_descriptor (P.Track.child ~uuid ~parent_uuid ~name))
 ;;
 
 let record_interns t rest =
@@ -431,7 +466,7 @@ let string_array ~name strings =
    [push_graph_section]) the graph blob. [flow_ids] is the span's lifecycle
    flow ([] where none applies: collapsed instants and the blob). *)
 let push_instant t ~uuid ~track_name ~name ~ts ~flow_ids ~args =
-  ensure_track t uuid ~name:track_name;
+  ensure_track t uuid ~parent_uuid:Track_uuid.process ~name:track_name;
   push
     t
     (P.Track_event
@@ -665,7 +700,7 @@ let emit_dynamic_includes_end t ~ts (b : dynamic_includes_begin) =
    malformed begin (missing a required field) is silently dropped: the
    matching end will then find nothing buffered and drop too, same as an
    end with no begin. *)
-let record_span_begin t ~name ~async_id ~ts rest =
+let record_span_begin t ~name ~span_id ~ts rest =
   let forced_by = Option.value (field "forced_by" rest) ~default:(Sexp.List []) in
   let ids key =
     match field key rest with
@@ -681,7 +716,7 @@ let record_span_begin t ~name ~async_id ~ts rest =
      | Some (Atom rule_id), Some (Atom dir) ->
        Table.set
          t.open_rules
-         async_id
+         span_id
          { rule_id
          ; dir
          ; target_files = ids "target_files"
@@ -702,13 +737,13 @@ let record_span_begin t ~name ~async_id ~ts rest =
           the rule executed, so the id is guaranteed to surface on the
           rule's start/finish instants (never on a collapsed one). *)
        let action_flow_ids =
-         match Table.find t.open_rules async_id with
+         match Table.find t.open_rules span_id with
          | Some (b : rule_begin) -> [ b.flow_id ]
          | None -> []
        in
        Table.set
          t.open_actions
-         async_id
+         span_id
          { action_rule_id = rule_id; action_begin_ts = ts; action_flow_ids }
      | _ -> ())
   | "build-dep" ->
@@ -716,7 +751,7 @@ let record_span_begin t ~name ~async_id ~ts rest =
      | Some (Atom dep) ->
        Table.set
          t.open_deps
-         async_id
+         span_id
          { dep; forced_by; begin_ts = ts; flow_id = fresh_flow_id t }
      | _ -> ())
   | "gen-rules" ->
@@ -724,7 +759,7 @@ let record_span_begin t ~name ~async_id ~ts rest =
      | Some (Atom dir) ->
        Table.set
          t.open_gen_rules
-         async_id
+         span_id
          { gen_rules_dir = dir
          ; gen_rules_begin_ts = ts
          ; gen_rules_flow_id = fresh_flow_id t
@@ -735,7 +770,7 @@ let record_span_begin t ~name ~async_id ~ts rest =
      | Some (Atom dune_file) ->
        Table.set
          t.open_dynamic_includes
-         async_id
+         span_id
          { dynamic_includes_dune_file = dune_file
          ; dynamic_includes_begin_ts = ts
          ; dynamic_includes_flow_id = fresh_flow_id t
@@ -750,13 +785,13 @@ let record_span_begin t ~name ~async_id ~ts rest =
    An end with no buffered begin (the begin was malformed, or predates this
    process) is dropped; a begin with no end is flushed separately at EOF
    (see [to_packets]). *)
-let record_span_end t ~name ~async_id ~ts rest =
+let record_span_end t ~name ~span_id ~ts rest =
   match name with
   | "exec-rule" ->
-    (match Table.find t.open_rules async_id with
+    (match Table.find t.open_rules span_id with
      | None -> ()
      | Some b ->
-       Table.remove t.open_rules async_id;
+       Table.remove t.open_rules span_id;
        let rule_outcome =
          match field "rule_outcome" rest with
          | Some (Atom s) -> s
@@ -811,16 +846,16 @@ let record_span_end t ~name ~async_id ~ts rest =
        t.rev_rule_lines <- line :: t.rev_rule_lines;
        emit_exec_rule_end t ~ts b ~rule_outcome)
   | "exec-rule-action" ->
-    (match Table.find t.open_actions async_id with
+    (match Table.find t.open_actions span_id with
      | None -> ()
      | Some b ->
-       Table.remove t.open_actions async_id;
+       Table.remove t.open_actions span_id;
        emit_action_end t ~ts b)
   | "build-dep" ->
-    (match Table.find t.open_deps async_id with
+    (match Table.find t.open_deps span_id with
      | None -> ()
      | Some b ->
-       Table.remove t.open_deps async_id;
+       Table.remove t.open_deps span_id;
        (* A missing [dep_outcome] (malformed end) degrades to "?" rather
           than dropping the span, mirroring exec-rule's [rule_outcome]
           fallback above: the blob line and the perfetto instants should
@@ -840,10 +875,10 @@ let record_span_end t ~name ~async_id ~ts rest =
        t.rev_dep_lines <- line :: t.rev_dep_lines;
        emit_build_dep_end t ~ts b ~dep_outcome)
   | "gen-rules" ->
-    (match Table.find t.open_gen_rules async_id with
+    (match Table.find t.open_gen_rules span_id with
      | None -> ()
      | Some b ->
-       Table.remove t.open_gen_rules async_id;
+       Table.remove t.open_gen_rules span_id;
        let dune_file =
          match field "dune_file" rest with
          | Some (Atom f) -> Some f
@@ -851,21 +886,21 @@ let record_span_end t ~name ~async_id ~ts rest =
        in
        emit_gen_rules_end t ~ts b ~dune_file)
   | "dynamic-includes" ->
-    (match Table.find t.open_dynamic_includes async_id with
+    (match Table.find t.open_dynamic_includes span_id with
      | None -> ()
      | Some b ->
-       Table.remove t.open_dynamic_includes async_id;
+       Table.remove t.open_dynamic_includes span_id;
        emit_dynamic_includes_end t ~ts b)
   | _ -> ()
 ;;
 
-(* Dispatch a graph event's (already-extracted) phase/id to the begin/end
-   recorders above; anything else (a different category, an "instant"
-   phase, or a malformed async event) is not part of the graph lifecycle. *)
-let record_graph_span t ~cat ~name ~async_phase ~async_id ~ts rest =
-  match cat, async_phase, async_id with
-  | "graph", Some "begin", Some id -> record_span_begin t ~name ~async_id:id ~ts rest
-  | "graph", Some "end", Some id -> record_span_end t ~name ~async_id:id ~ts rest
+(* Dispatch a graph event's (already-extracted) phase to the begin/end
+   recorders above; anything else (an "instant" phase, or a malformed async
+   event) is not part of the graph lifecycle. *)
+let record_graph_span t ~name ~async_phase ~span_id ~ts rest =
+  match async_phase with
+  | "begin" -> record_span_begin t ~name ~span_id ~ts rest
+  | "end" -> record_span_end t ~name ~span_id ~ts rest
   | _ -> ()
 ;;
 
@@ -875,7 +910,7 @@ let record_graph_span t ~cat ~name ~async_phase ~async_id ~ts rest =
    doc/dev/trace-graph-perfetto.md, phase 1). *)
 let flush_open_rules t =
   Table.to_list t.open_rules
-  |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
+  |> List.sort ~compare:(fun (a, _) (b, _) -> Span_id.compare a b)
   |> List.map ~f:(fun (_, b) ->
     String.concat
       ~sep:"\t"
@@ -892,7 +927,7 @@ let flush_open_rules t =
 
 let flush_open_deps t =
   Table.to_list t.open_deps
-  |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
+  |> List.sort ~compare:(fun (a, _) (b, _) -> Span_id.compare a b)
   |> List.map ~f:(fun (_, b) ->
     String.concat ~sep:"\t" [ b.dep; "?"; Graph_blob.forced_by_code b.forced_by; "" ])
 ;;
@@ -906,9 +941,9 @@ let flush_open_deps t =
    (elsewhere the id ends up on a single event, which draws nothing). *)
 let flush_open_start_instants t =
   let sorted tbl =
-    Table.to_list tbl |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
+    Table.to_list tbl |> List.sort ~compare:(fun (a, _) (b, _) -> Span_id.compare a b)
   in
-  List.iter (sorted t.open_rules) ~f:(fun (_async_id, (b : rule_begin)) ->
+  List.iter (sorted t.open_rules) ~f:(fun (_span_id, (b : rule_begin)) ->
     push_instant
       t
       ~uuid:Track_uuid.exec_rule
@@ -917,7 +952,7 @@ let flush_open_start_instants t =
       ~ts:b.begin_ts
       ~flow_ids:[ b.flow_id ]
       ~args:(dune_args (rule_id_arg b.rule_id)));
-  List.iter (sorted t.open_deps) ~f:(fun (_async_id, (b : dep_begin)) ->
+  List.iter (sorted t.open_deps) ~f:(fun (_span_id, (b : dep_begin)) ->
     push_instant
       t
       ~uuid:Track_uuid.build_dep
@@ -926,7 +961,7 @@ let flush_open_start_instants t =
       ~ts:b.begin_ts
       ~flow_ids:[ b.flow_id ]
       ~args:(dune_args (dep_id_arg b.dep)));
-  List.iter (sorted t.open_gen_rules) ~f:(fun (_async_id, (b : gen_rules_begin)) ->
+  List.iter (sorted t.open_gen_rules) ~f:(fun (_span_id, (b : gen_rules_begin)) ->
     push_instant
       t
       ~uuid:Track_uuid.gen_rules
@@ -937,7 +972,7 @@ let flush_open_start_instants t =
       ~args:(dune_args [ P.Arg.string ~name:"dir" b.gen_rules_dir ]));
   List.iter
     (sorted t.open_dynamic_includes)
-    ~f:(fun (_async_id, (b : dynamic_includes_begin)) ->
+    ~f:(fun (_span_id, (b : dynamic_includes_begin)) ->
       push_instant
         t
         ~uuid:Track_uuid.dynamic_includes
@@ -946,7 +981,7 @@ let flush_open_start_instants t =
         ~ts:b.dynamic_includes_begin_ts
         ~flow_ids:[ b.dynamic_includes_flow_id ]
         ~args:(dune_args [ P.Arg.string ~name:"dune_file" b.dynamic_includes_dune_file ]));
-  List.iter (sorted t.open_actions) ~f:(fun (_async_id, (b : action_begin)) ->
+  List.iter (sorted t.open_actions) ~f:(fun (_span_id, (b : action_begin)) ->
     push_action_start t b)
 ;;
 
@@ -1024,6 +1059,19 @@ let classify_field ~name key v =
          (List.filter_map xs ~f:(function
             | Sexp.Atom s -> Some s
             | _ -> None)))
+  | "forced_by", Sexp.List parts ->
+    (* Only a process slice gets here with a forcer: a graph span's is
+       blob-only. Its parts are a tag and at most one path, which read as one
+       phrase ("rule 12", "gen-rules _build/default"), so they are joined into
+       a single annotation rather than indexed as an array. *)
+    `Dune
+      (P.Arg.string
+         ~name:key
+         (String.concat
+            ~sep:" "
+            (List.filter_map parts ~f:(function
+               | Sexp.Atom s -> Some s
+               | _ -> None))))
   | _ -> `Top (scalar_arg key v)
 ;;
 
@@ -1043,8 +1091,89 @@ let event_fields ~name rest =
   | _ :: _ -> P.Arg.dict ~name:"dune" dune :: top
 ;;
 
+(* Take the lowest-numbered slot whose previous process has finished, and
+   finished no later than this one starts; failing that, open a new slot. The
+   [slot_last_ts] check is needed because the stream is not strictly ordered
+   in time: a process run through the action runner has its begin emitted only
+   once the response arrives, carrying a timestamp already in the past. In the
+   worst case that costs an extra slot -- never a mis-nested slice. *)
+let claim_process_slot t ~ts =
+  match
+    List.find t.process_slots ~f:(fun slot ->
+      (not slot.slot_busy) && slot.slot_last_ts <= ts)
+  with
+  | Some slot ->
+    slot.slot_busy <- true;
+    slot
+  | None ->
+    let slot =
+      { slot_uuid = fresh_track_uuid t
+      ; slot_name = sprintf "job-%d" (List.length t.process_slots + 1)
+      ; slot_busy = true
+      ; slot_last_ts = ts
+      }
+    in
+    t.process_slots <- t.process_slots @ [ slot ];
+    slot
+;;
+
+(* Hold the begin's fields until its end arrives, so that the whole slice --
+   the command and how it went -- carries one merged set of args, as the single
+   complete event this replaced did. *)
+let record_process_begin t ~cat ~span_id ~ts rest =
+  Table.set
+    t.open_processes
+    span_id
+    { process_slot = claim_process_slot t ~ts
+    ; process_begin_ts = ts
+    ; process_cat = cat
+    ; process_fields = rest
+    }
+;;
+
+let push_process_slice t (b : process_begin) ~stop rest =
+  let { slot_uuid; slot_name; _ } = b.process_slot in
+  let name = "process" in
+  ensure_track t Track_uuid.processes ~parent_uuid:Track_uuid.process ~name:"processes";
+  ensure_track t slot_uuid ~parent_uuid:Track_uuid.processes ~name:slot_name;
+  push
+    t
+    (P.Track_event
+       (P.Event.create
+          ~name
+          ~categories:[ b.process_cat ]
+          ~args:(event_fields ~name (b.process_fields @ rest))
+          P.Event.Type.Begin
+          ~track_uuid:slot_uuid
+          ~ts:b.process_begin_ts));
+  push t (P.Track_event (P.Event.create P.Event.Type.End ~track_uuid:slot_uuid ~ts:stop))
+;;
+
+(* An end with no buffered begin (the begin predates this trace file) is
+   dropped, as it is for graph spans. *)
+let record_process_end t ~span_id ~ts rest =
+  match Table.find t.open_processes span_id with
+  | None -> ()
+  | Some b ->
+    Table.remove t.open_processes span_id;
+    b.process_slot.slot_busy <- false;
+    b.process_slot.slot_last_ts <- ts;
+    push_process_slice t b ~stop:ts rest
+;;
+
+(* A process still running at EOF (dune crashed, or was interrupted) never
+   gets its end, so close the slice at the last timestamp seen rather than
+   leave it dangling. Sorted by span id for determinism, as the graph flushes
+   are. *)
+let flush_open_processes t =
+  Table.to_list t.open_processes
+  |> List.sort ~compare:(fun (a, _) (b, _) -> Span_id.compare a b)
+  |> List.iter ~f:(fun (_span_id, b) ->
+    push_process_slice t b ~stop:(Int.max t.last_ts b.process_begin_ts) [])
+;;
+
 let add t sexp =
-  let cat, name, ts_sexp, rest, _ = Trace_common.Event_sexp.to_base_args sexp in
+  let cat, name, ts_sexp, rest, digest = Trace_common.Event_sexp.to_base_args sexp in
   let ts, dur = Trace_common.Event_sexp.to_times ts_sexp in
   let ts_ns = Time.to_ns ts in
   t.last_ts <- ts_ns;
@@ -1054,8 +1183,15 @@ let add t sexp =
     ensure_process t;
     let async_phase, async_id, rest = Trace_common.Event_sexp.to_async_args rest in
     (match async_phase, async_id with
-     | Some ("begin" | "end"), Some id ->
-       record_graph_span t ~cat ~name ~async_phase ~async_id:(Some id) ~ts:ts_ns rest
+     | Some (("begin" | "end") as async_phase), Some async_id ->
+       let span_id = Span_id.make ~digest ~async_id in
+       (match cat with
+        | "graph" -> record_graph_span t ~name ~async_phase ~span_id ~ts:ts_ns rest
+        | "process" ->
+          (match async_phase with
+           | "begin" -> record_process_begin t ~cat ~span_id ~ts:ts_ns rest
+           | _ -> record_process_end t ~span_id ~ts:ts_ns rest)
+        | _ -> ())
      | _ ->
        let args = event_fields ~name rest in
        let open P.Event.Type in
@@ -1092,6 +1228,7 @@ let to_packets t =
   let rules = List.rev t.rev_rule_lines @ flush_open_rules t in
   let deps = List.rev t.rev_dep_lines @ flush_open_deps t in
   flush_open_start_instants t;
+  flush_open_processes t;
   if not (List.is_empty dict && List.is_empty rules && List.is_empty deps)
   then (
     ensure_process t;

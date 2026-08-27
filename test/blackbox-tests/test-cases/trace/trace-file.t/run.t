@@ -3,10 +3,10 @@
 
 This captures the commands that are being run:
 
-  $ dune trace cat | jq_dune '
-  >   processes
+  $ dune trace cat | jq_dune -s '
+  >   processSpans
   > | .args
-  > | del(.pid)
+  > | del(.pid, .queued)
   > | .prog |= sub(".*/"; "")
   > | .rusage |= keys
   > ' | censor
@@ -39,10 +39,10 @@ This captures the commands that are being run:
     "categories": [],
     "prog": "ocamldep.opt",
     "dir": "_build/default",
-    "exit": 0,
     "target_files": [
       "_build/.actions/default/$DIGEST"
     ],
+    "exit": 0,
     "rusage": [
       "inblock",
       "majflt",
@@ -79,12 +79,12 @@ This captures the commands that are being run:
     "categories": [],
     "prog": "ocamlc.opt",
     "dir": "_build/default",
-    "exit": 0,
     "target_files": [
       "_build/default/.prog.eobjs/byte/prog.cmi",
       "_build/default/.prog.eobjs/byte/prog.cmo",
       "_build/default/.prog.eobjs/byte/prog.cmt"
     ],
+    "exit": 0,
     "rusage": [
       "inblock",
       "majflt",
@@ -123,11 +123,11 @@ This captures the commands that are being run:
     "categories": [],
     "prog": "ocamlopt.opt",
     "dir": "_build/default",
-    "exit": 0,
     "target_files": [
       "_build/default/.prog.eobjs/native/prog.cmx",
       "_build/default/.prog.eobjs/native/prog.o"
     ],
+    "exit": 0,
     "rusage": [
       "inblock",
       "majflt",
@@ -156,10 +156,10 @@ This captures the commands that are being run:
     "categories": [],
     "prog": "ocamlopt.opt",
     "dir": "_build/default",
-    "exit": 0,
     "target_files": [
       "_build/default/prog.exe"
     ],
+    "exit": 0,
     "rusage": [
       "inblock",
       "majflt",

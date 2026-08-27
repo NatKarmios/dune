@@ -3,7 +3,7 @@ Concurrent RPC build requests finish independently when their targets are done.
   $ make_dune_project 3.23
   $ export DUNE_TRACE=rpc,process
   $ count_trace_events () {
-  >   dune trace cat | jq -r "$1" | wc -l
+  >   dune trace cat | jq -s -r "$1" | wc -l
   > }
   $ wait_for_trace_events () {
   >   jq_program="$1"
@@ -13,7 +13,7 @@ Concurrent RPC build requests finish independently when their targets are done.
   >     jq_program="$1"
   >     expected="$2"
   >     dune="$3"
-  >     while [ "$("$dune" trace cat | jq -r "$jq_program" | wc -l)" -lt "$expected" ]
+  >     while [ "$("$dune" trace cat | jq -s -r "$jq_program" | wc -l)" -lt "$expected" ]
   >     do
   >       sleep 0.01
   >     done
@@ -37,7 +37,20 @@ Concurrent RPC build requests finish independently when their targets are done.
   >   (bash "touch '$slow_started'; read _ < '$slow_release'; echo slow > slow-target")))
   > EOF
 
-  $ fast_finished_jq='select(.cat == "process" and .name == "finish" and (.args.target_files // [] | index("_build/default/fast-target"))) | .name'
+A process's targets are on the begin of its span and its exit on the end, so
+finding the end of the fast target's process means pairing the two on their
+async id:
+
+  $ fast_finished_jq='
+  >   [ .[] | select(.cat == "process" and .name == "process") ] as $spans
+  > | [ $spans[]
+  >   | select(.async_phase == "begin")
+  >   | select(.args.target_files // [] | index("_build/default/fast-target"))
+  >   | .async_id
+  >   ] as $ids
+  > | $spans[]
+  > | select(.async_phase == "end" and (.async_id | IN($ids[])))
+  > | .name'
   $ start_dune -j 2
   $ fast_finishes=$(count_trace_events "$fast_finished_jq")
   $ dune rpc build --wait fast-target > fast.out 2>&1 &
