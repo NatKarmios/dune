@@ -152,7 +152,7 @@ let term =
       & info
           [ "trace-file" ]
           ~docv:"FILE"
-          ~doc:(Some "Read this trace file (default: _build/trace.json)"))
+          ~doc:(Some "Read this trace file (default: _build/trace.csexp)"))
   in
   Common.No_build.set_debug_backtraces debug_backtraces;
   match trace_file with
