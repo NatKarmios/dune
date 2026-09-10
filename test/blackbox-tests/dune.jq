@@ -23,9 +23,6 @@ def redactAnonymousActionPath:
 def traceTargetFilesRedacted:
   (.args.target_files | values) | map(redactAnonymousActionPath);
 
-# A process's span begins with the command that ran and ends with the outcome
-# of running it. Most filters only want the command, so `processes` is the
-# begin; `processSpans` merges the two ends for the filters that need both.
 def processes: select(.cat == "process" and .async_phase == "begin");
 
 def processSpans:

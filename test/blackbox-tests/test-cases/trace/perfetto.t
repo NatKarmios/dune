@@ -22,7 +22,7 @@ build graph data.
   >  (action (copy /etc/hosts copy.txt)))
   > EOF
 
-Processes get a track each while they are running, so `-j 1` pins how many of
+Processes get a track each while they are running, so `-j 1` caps how many of
 those tracks the build needs (see the "job-N" section below) and with it the
 total track count asserted further down.
 
@@ -59,8 +59,8 @@ Spawned processes are slices too, but on their own pool of tracks rather than
 the main thread: slices on one perfetto track have to nest and parallel
 processes do not, so each concurrent process takes a "job-N" track of its own,
 under a "processes" track. A slot is reused once the process on it has
-finished, so the pool is as wide as the build's concurrency -- one track, at
-`-j 1` -- however many processes the build runs.
+finished, so the pool is, at most, as wide as the build's concurrency -- one
+track, at `-j 1` -- however many processes the build runs.
 
   $ grep -c 'name: "processes"' dump.textpb
   1
@@ -782,3 +782,46 @@ One slice each, named for the event rather than the command it ran:
 
   $ grep -c 'name: "process"' dump.textpb
   2
+
+A crash or a kill leaves begin events with no matching end. [Event_sexp.iter]
+stops at the first record it cannot read, so cutting a trace file short stands
+in for the writer having died mid-build. The spans still open at that point are
+flushed as blob lines with "?" in place of the outcome/resolution and *empty*
+dep-set, dyn-dep-stage and status fields (doc/dev/trace-graph-perfetto.md): "?"
+in those fields would say dune looked and could not tell, which for a span that
+never ended it never did.
+
+  $ cat >dune <<EOF
+  > (rule (target a.txt) (action (with-stdout-to a.txt (echo "a"))))
+  > (rule (target b.txt) (deps a.txt) (action (with-stdout-to b.txt (cat a.txt))))
+  > (rule (target c.txt) (deps b.txt) (action (with-stdout-to c.txt (cat b.txt))))
+  > (rule (target d.txt) (deps c.txt) (action (with-stdout-to d.txt (cat c.txt))))
+  > (rule (target e.txt) (deps d.txt) (action (with-stdout-to e.txt (cat d.txt))))
+  > EOF
+  $ DUNE_TRACE=+graph dune build -j 1 e.txt
+  $ head -c $(( $(wc -c < _build/trace.csexp) - 3000 )) _build/trace.csexp > cut.csexp
+  $ dune trace perfetto --trace-file cut.csexp --text > dump.textpb
+
+The cut leaves spans of both kinds unfinished:
+
+  $ test -n "$(decode_section graph-rules | awk -F'~' '$5 == "?"')" && echo yes
+  yes
+  $ test -n "$(decode_section graph-deps | awk -F'~' '$2 == "?"')" && echo yes
+  yes
+
+Their dep-set, dyn-dep-stage and status fields are empty, however many of them
+the cut happened to leave:
+
+  $ decode_section graph-rules | awk -F'~' '$5 == "?" { print "[" $7 "|" $8 "]" }' \
+  >   | sort -u
+  [|]
+  $ decode_section graph-deps | awk -F'~' '$2 == "?" { print "[" $4 "]" }' | sort -u
+  []
+
+A flushed line has the same field count as one written by a span that ended, so
+a consumer needs no separate parse for them:
+
+  $ decode_section graph-rules | awk -F'~' '{ print NF }' | sort -u
+  8
+  $ decode_section graph-deps | awk -F'~' '{ print NF }' | sort -u
+  4
