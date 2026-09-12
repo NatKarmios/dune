@@ -40,7 +40,7 @@ module Forced_by = struct
 end
 
 module Build_dep = struct
-  module Outcome = Graph.Build_dep.Outcome
+  module Resolution = Graph.Build_dep.Resolution
   module Status = Graph.Build_dep.Status
 
   module Emit = struct
@@ -49,19 +49,19 @@ module Build_dep = struct
       @@ fun () -> Graph.Build_dep.start ~async_id ~forced_by ~dep:(dep_to_string dep)
     ;;
 
-    let finish ~async_id outcome status =
+    let finish ~async_id resolution status =
       Dune_trace.emit_all ~buffered:true Category.Graph
-      @@ fun () -> Graph.Build_dep.finish ~async_id ~outcome ~status
+      @@ fun () -> Graph.Build_dep.finish ~async_id ~resolution ~status
     ;;
   end
 
-  let expanded deps = Outcome.Dep_expanded (Dep.Set.to_list_map deps ~f:dep_to_string)
+  let expanded deps = Resolution.Expanded (Dep.Set.to_list_map deps ~f:dep_to_string)
 
   (* Trace building [dep] as an async span: [f] runs with [forced_by] set to
      this dep and a [report] callback for its resolution, and the span ends
      once [f] settles. If [f] raises without having reported, [on_failure]
-     supplies the outcome; a cancellation goes straight to [Dep_unknown]. *)
-  let start ~(dep : Dep.t) ~outcome_of ~on_failure (f : ('b -> unit) -> 'a Memo.t)
+     supplies the resolution; a cancellation goes straight to [Unknown]. *)
+  let start ~(dep : Dep.t) ~resolution_of ~on_failure (f : ('b -> unit) -> 'a Memo.t)
     : 'a Memo.t
     =
     if enabled Category.Graph
@@ -74,19 +74,19 @@ module Build_dep = struct
        (* [report] only records the resolution; the span still ends when the
           building does. A span has at most one end. *)
        let resolved = ref None in
-       let report x = resolved := Some (outcome_of x) in
+       let report x = resolved := Some (resolution_of x) in
        let finished = ref false in
-       let emit_finish outcome status =
+       let emit_finish resolution status =
          if not !finished
          then (
            finished := true;
-           Emit.finish ~async_id outcome status)
+           Emit.finish ~async_id resolution status)
        in
        Fiber.with_error_handler
          (fun () ->
             let+ result = Forced_by.set ~new_forcer f report in
             emit_finish
-              (Option.value !resolved ~default:Outcome.Dep_unknown)
+              (Option.value !resolved ~default:Resolution.Unknown)
               Status.Succeeded;
             result)
          ~on_error:(fun exn ->
@@ -97,15 +97,15 @@ module Build_dep = struct
            in
            let* () =
              match !resolved, status with
-             | Some outcome, _ ->
-               emit_finish outcome status;
+             | Some resolution, _ ->
+               emit_finish resolution status;
                Fiber.return ()
              | None, Status.Cancelled ->
-               emit_finish Outcome.Dep_unknown status;
+               emit_finish Resolution.Unknown status;
                Fiber.return ()
              | None, (Succeeded | Failed) ->
-               let+ outcome = on_failure () in
-               emit_finish outcome status
+               let+ resolution = on_failure () in
+               emit_finish resolution status
            in
            Exn_with_backtrace.reraise exn))
       |> Memo.of_reproducible_fiber)
@@ -114,14 +114,14 @@ module Build_dep = struct
 
   (* [file] and [file_selector] know their resolution before anything can
      fail, so a failure with none reported means there is none. *)
-  let unknown_on_failure () = Fiber.return Outcome.Dep_unknown
+  let unknown_on_failure () = Fiber.return Resolution.Unknown
 
   let file (path : Path.t) f =
     start
       ~dep:(Dep.file path)
-      ~outcome_of:(function
-        | None -> Outcome.Dep_is_source
-        | Some (rule : Rule.t) -> Dep_rule (Rule.Id.to_int rule.id))
+      ~resolution_of:(function
+        | None -> Resolution.Source
+        | Some (rule : Rule.t) -> Resolution.Rule (Rule.Id.to_int rule.id))
       ~on_failure:unknown_on_failure
       f
   ;;
@@ -132,7 +132,7 @@ module Build_dep = struct
     let dep = Dep.alias alias in
     start
       ~dep
-      ~outcome_of:(fun (facts : Dep.Facts.t list) ->
+      ~resolution_of:(fun (facts : Dep.Facts.t list) ->
         facts |> List.map ~f:Dep.Set.of_keys |> Dep.Set.union_all |> expanded)
       ~on_failure:(fun () ->
         Fiber.map
@@ -140,15 +140,15 @@ module Build_dep = struct
              Forced_by.set ~new_forcer:(Forced_by.dep ~dep) recover ()))
           ~f:(function
             | Ok deps -> expanded deps
-            | Error (_ : Exn_with_backtrace.t list) -> Outcome.Dep_unknown))
+            | Error (_ : Exn_with_backtrace.t list) -> Resolution.Unknown))
       f
   ;;
 
   let file_selector (file_selector : File_selector.t) f =
     start
       ~dep:(Dep.file_selector file_selector)
-      ~outcome_of:(fun (files : Filename_set.t) ->
-        Outcome.Dep_expanded (Filename_set.to_list files |> List.map ~f:path_to_string))
+      ~resolution_of:(fun (files : Filename_set.t) ->
+        Resolution.Expanded (Filename_set.to_list files |> List.map ~f:path_to_string))
       ~on_failure:unknown_on_failure
       f
   ;;

@@ -303,12 +303,12 @@ module Event : sig
 
   module Graph : sig
     module Build_dep : sig
-      module Outcome : sig
+      module Resolution : sig
         type t =
-          | Dep_rule of int
-          | Dep_expanded of string list
-          | Dep_is_source
-          | Dep_unknown
+          | Rule of int
+          | Expanded of string list
+          | Source
+          | Unknown
       end
 
       module Status : sig
@@ -324,7 +324,11 @@ module Event : sig
         -> dep:string
         -> t list
 
-      val finish : async_id:async_id -> outcome:Outcome.t -> status:Status.t -> t list
+      val finish
+        :  async_id:async_id
+        -> resolution:Resolution.t
+        -> status:Status.t
+        -> t list
     end
 
     module Exec_rule : sig

@@ -334,7 +334,7 @@ Recognised structural fields are grouped under a "dune" dict (surfacing as e.g.
   yes
 
 A rule's outcome and a dep's resolution are blob fields, so neither the
-tagged-union dicts of the csexp events (`rule_outcome`, `dep_outcome`,
+tagged-union dicts of the csexp events (`rule_outcome`, `dep_resolution`,
 `forced_by`'s `kind` tag) nor flattened strings of them (`outcome`,
 `outcome_kind`) reach the instants:
 
@@ -346,7 +346,7 @@ tagged-union dicts of the csexp events (`rule_outcome`, `dep_outcome`,
   [1]
   $ grep -q 'name: "kind"' dump.textpb && echo yes
   [1]
-  $ grep -q 'name: "dep_outcome"' dump.textpb && echo yes
+  $ grep -q 'name: "dep_resolution"' dump.textpb && echo yes
   [1]
   $ grep -q 'name: "rule_outcome"' dump.textpb && echo yes
   [1]

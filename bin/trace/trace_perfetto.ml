@@ -801,10 +801,10 @@ module Graph_span = struct
         ~args:(P_arg.wrap_dune (P_arg.dep_id b.dep))
     ;;
 
-    let push_finish t ~ts (b : Span.Dep.t) ~dep_outcome =
+    let push_finish t ~ts (b : Span.Dep.t) ~dep_resolution =
       let dur_ns = ts - b.begin_ts in
       let is_source =
-        match dep_outcome with
+        match dep_resolution with
         | Some (Sexp.List (Atom "is-source" :: _)) -> true
         | _ -> false
       in
@@ -844,12 +844,12 @@ module Graph_span = struct
 
     (* One [graph-deps] line, however it was produced: a span that never ended
        reported neither a resolution nor a status. *)
-    let append_blob t (b : Span.Dep.t) ~dep_outcome ~dep_status =
+    let append_blob t (b : Span.Dep.t) ~dep_resolution ~dep_status =
       let line =
         String.concat
           ~sep:"\t"
           [ b.dep
-          ; Graph_blob.dep_resolution dep_outcome
+          ; Graph_blob.dep_resolution dep_resolution
           ; Graph_blob.forced_by_code b.forced_by
           ; Graph_blob.dep_status_code dep_status
           ]
@@ -862,15 +862,15 @@ module Graph_span = struct
       | None -> ()
       | Some b ->
         Span_table.remove t.open_deps span_id;
-        let dep_outcome = field "dep_outcome" rest in
+        let dep_resolution = field "dep_resolution" rest in
         let dep_status = field "dep_status" rest in
-        append_blob t b ~dep_outcome ~dep_status;
-        push_finish t ~ts b ~dep_outcome
+        append_blob t b ~dep_resolution ~dep_status;
+        push_finish t ~ts b ~dep_resolution
     ;;
 
     let flush_unmatched t =
       List.iter (Span_table.sorted t.open_deps) ~f:(fun (_span_id, b) ->
-        append_blob t b ~dep_outcome:None ~dep_status:None;
+        append_blob t b ~dep_resolution:None ~dep_status:None;
         push_start t b)
     ;;
   end

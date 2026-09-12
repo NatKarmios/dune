@@ -140,7 +140,7 @@ consumer can tell apart from a span that simply never ended:
   >       ({}; .[$b.async_id | tostring] = $names[$b.args.dep | tostring])) as $deps
   >   | [ .[] | select(.name == "build-dep" and .async_phase == "end")
   >       | select($deps[.async_id | tostring] | endswith("@slow-alias"))
-  >       | .args.dep_outcome[0] + " (" + (.args.dep_status // "succeeded") + ")" ][0]
+  >       | .args.dep_resolution[0] + " (" + (.args.dep_status // "succeeded") + ")" ][0]
   > '
   unknown (cancelled)
 
@@ -182,7 +182,7 @@ carried.
   >   | [ .[] | select(.name == "build-dep" and .async_phase == "end")
   >       | ($deps[.async_id | tostring]) as $dep
   >       | select($dep | contains("/.dune/") | not)
-  >       | $dep + " -> " + .args.dep_outcome[0]
+  >       | $dep + " -> " + .args.dep_resolution[0]
   >         + " (" + (.args.dep_status // "succeeded") + ")" ]
   >   | sort[]
   > '
@@ -201,8 +201,8 @@ rule, the dep's span therefore outlives that rule's exec-rule span:
   >   (reduce (.[] | select(.name == "exec-rule" and .async_phase == "end")) as $r
   >     ({}; .[$r.args.rule_id | tostring] = $r.ts)) as $rule_end
   >   | [ .[] | select(.name == "build-dep" and .async_phase == "end")
-  >       | select(.args.dep_outcome[0] == "rule")
-  >       | $rule_end[.args.dep_outcome[1] | tostring] as $end
+  >       | select(.args.dep_resolution[0] == "rule")
+  >       | $rule_end[.args.dep_resolution[1] | tostring] as $end
   >       | select($end != null)
   >       | .ts >= $end ]
   >   | (length > 0) and all
@@ -218,7 +218,7 @@ The alias's recovered expansion includes the dep whose build failed:
   >       ({}; .[$b.async_id | tostring] = $names[$b.args.dep | tostring])) as $deps
   >   | [ .[] | select(.name == "build-dep" and .async_phase == "end")
   >       | select($deps[.async_id | tostring] | endswith("@my-alias"))
-  >       | [ .args.dep_outcome[1:][] | $names[tostring] ] ]
+  >       | [ .args.dep_resolution[1:][] | $names[tostring] ] ]
   > '
   [["_build/default/boom.txt"]]
 

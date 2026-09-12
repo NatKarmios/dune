@@ -1131,23 +1131,23 @@ module Graph = struct
   ;;
 
   module Build_dep = struct
-    module Outcome = struct
+    module Resolution = struct
       type t =
-        | Dep_rule of int
-        | Dep_expanded of string list
-        | Dep_is_source
-        | Dep_unknown
+        | Rule of int
+        | Expanded of string list
+        | Source
+        | Unknown
 
       let arg_interned ~ts = function
-        | Dep_rule rule_id -> Arg.list [ Arg.string "rule"; Arg.int rule_id ], []
-        | Dep_expanded expanded ->
+        | Rule rule_id -> Arg.list [ Arg.string "rule"; Arg.int rule_id ], []
+        | Expanded expanded ->
           let intern_events, expanded_ids = Intern.strings ~ts expanded in
           let arg =
             Arg.list (Arg.string "expanded" :: List.map expanded_ids ~f:Arg.int)
           in
           arg, intern_events
-        | Dep_is_source -> Arg.list [ Arg.string "is-source" ], []
-        | Dep_unknown -> Arg.list [ Arg.string "unknown" ], []
+        | Source -> Arg.list [ Arg.string "is-source" ], []
+        | Unknown -> Arg.list [ Arg.string "unknown" ], []
       ;;
     end
 
@@ -1181,11 +1181,11 @@ module Graph = struct
       @ [ Event.async_begin ~args ~async_id ~name:"build-dep" ts Graph ]
     ;;
 
-    let finish ~async_id ~outcome ~status =
+    let finish ~async_id ~resolution ~status =
       let ts = Time.now () in
-      let outcome_arg, intern_events = Outcome.arg_interned ~ts outcome in
+      let resolution_arg, intern_events = Resolution.arg_interned ~ts resolution in
       let status_arg = Status.arg status in
-      let args = [ "dep_outcome", outcome_arg ] @ status_arg in
+      let args = [ "dep_resolution", resolution_arg ] @ status_arg in
       intern_events @ [ Event.async_end ~args ~async_id ~name:"build-dep" ts Graph ]
     ;;
   end
