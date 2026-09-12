@@ -34,7 +34,7 @@
   dune_config_file
   chrome_trace
   dune_trace
-  dune_perfetto
+  perfetto
   csexp
   dune_rpc_impl
   dune_rpc

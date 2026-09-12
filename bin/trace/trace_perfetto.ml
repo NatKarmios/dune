@@ -251,7 +251,7 @@ module Graph_blob = struct
   end
 end
 
-module P = Dune_perfetto
+module P = Perfetto
 module Span_id = Trace_common.Span_id
 
 (* The open spans of one kind, keyed by the span they belong to. *)
