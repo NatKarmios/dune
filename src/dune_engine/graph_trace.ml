@@ -229,8 +229,8 @@ module Exec_rule = struct
         ~(rule : Rule.t)
         (f :
           deps_resolved:(Dep.Facts.t -> unit)
-          -> finish:(dyn_deps:Dep.Set.t list -> outcome -> unit)
           -> trace_action:((unit -> 'b Fiber.t) -> 'b Fiber.t)
+          -> finish:(dyn_deps:Dep.Set.t list -> outcome -> unit)
           -> 'a Memo.t)
     : 'a Memo.t
     =

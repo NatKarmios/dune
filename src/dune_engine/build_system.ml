@@ -531,7 +531,7 @@ module Internal = struct
 
   and execute_rule_impl ~rule_kind rule =
     Graph_trace.Exec_rule.start ~rule
-    @@ fun ~deps_resolved ~finish ~trace_action ->
+    @@ fun ~deps_resolved ~trace_action ~finish ->
     let { Rule.id = _; targets; mode; action; info = _; loc } = rule in
     let head_target = Targets.Validated.head targets in
     let* execution_parameters =
