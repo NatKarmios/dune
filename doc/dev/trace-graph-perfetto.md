@@ -9,10 +9,9 @@
 Dune can record the build graph it walks — which rules ran, what forced
 them, what each one depended on, and how long each step took — and export
 the result as a Perfetto trace. A Perfetto UI plugin consumes that trace and
-turns it into a browsable graph on top of the ordinary timeline.
-
-- Plugin, and everything about *using* the resulting trace:
-  <https://github.com/NatKarmios/perfetto/blob/dune-graph-trace/ui/src/plugins/com.karmios.nat.DuneGraph/README.md>
+turns it into a browsable graph on top of the ordinary timeline;
+[see here](https://github.com/NatKarmios/perfetto/blob/dune-graph-trace/ui/src/plugins/com.karmios.nat.DuneGraph/README.md)
+for more information.
 
 ## Producing a trace
 
@@ -21,24 +20,14 @@ record, then convert the trace:
 
 ```console
 $ DUNE_TRACE=+graph dune build @all
-$ dune trace perfetto -o trace.pb
+$ dune trace perfetto --trace-file _build/trace.csexp | gzip > build.perfetto.gz
 ```
 
-Load `trace.pb` in <https://ui.perfetto.dev/> (with the plugin installed, to
+Load `build.perfetto.gz` in Perfetto (with the plugin installed, to
 get the graph views).
 
 Trace events land in `_build/trace.csexp` unless `dune build --trace-file
 FILE` says otherwise.
-
-### `dune trace` commands
-
-| command | purpose |
-|---------|---------|
-| `dune trace perfetto` | convert the trace to Perfetto protobuf |
-| `dune trace cat` | print events as JSON (one object per line) |
-| `dune trace commands` | print the processes the build ran, as shell commands |
-
-All three take `--trace-file FILE` (default: `_build/trace.csexp`).
 
 `dune trace perfetto` options:
 
@@ -46,13 +35,8 @@ All three take `--trace-file FILE` (default: `_build/trace.csexp`).
 - `--text` — human-readable protobuf text dump instead of binary. Useful for
   inspection and for tests.
 
-`dune trace cat` options: `--sexp` (pretty-printed sexp), `--chrome-trace`
-(Chrome/`chrome://tracing` JSON), `--follow`/`-f` (keep reading until the
-trace's exit event).
-
-The `graph` category costs build time and trace size. `dune trace cat` and
-`dune trace commands` are unaffected by the Perfetto conversion: they render
-the csexp events directly.
+The `graph` category costs build time and trace size. `dune trace cat` is
+unaffected by the Perfetto conversion: it renders the csexp events directly.
 
 ## What the converted trace looks like
 
@@ -152,21 +136,6 @@ joins the two tracks.
 
 Flows are a stock-UI affordance. A consumer should join on `rule_id` / `dep_id`
 and not depend on flows.
-
-### Interval materialization
-
-To turn a rule's demand-to-done interval into a real slice (via the stock
-debug-tracks feature, or from a plugin):
-
-```sql
-SELECT s.ts - extract_arg(s.arg_set_id, 'debug.dune.dur_ns') AS ts,
-       extract_arg(s.arg_set_id, 'debug.dune.dur_ns') AS dur,
-       s.name AS name
-FROM slice s
-JOIN track t ON s.track_id = t.id
-WHERE t.name = 'exec-rule'
-  AND extract_arg(s.arg_set_id, 'debug.dune.rule_id') IN (<rule ids>)
-```
 
 ## The graph blob (schema v1)
 
@@ -350,9 +319,6 @@ rule's span by construction.
 - **`graph-dict` is not filtered** to the ids `graph-rules`/`graph-deps`
   reference. This is harmless: `intern` events only cover strings the graph
   category actually used.
-- **The stock UI shows ids, not paths.** Clicking an instant gives a
-  `rule_id`, not a target — that is the trade the blob makes. Flows and
-  `dur_ns` are what the stock UI still answers on its own.
 - **The converter buffers all packets in memory.** Multi-GB csexp inputs may
   eventually need a streaming writer.
 - **Not every `name: "outcome"` in a dump is a rule outcome.** That one is the
@@ -384,13 +350,3 @@ Measured on a real monorepo trace (551 MB csexp, 386,320 `exec-rule` spans):
   **4,374,823 rows, 15.6% of the literal baseline** (700 cores; 47,170 sets
   got one). Converted output: 181.4 MB, down from 333.6 MB.
 
-On a synthetic 2000-rule project with fan-in 50 (~100k dep edges), against
-the pre-redesign converter:
-
-- Track descriptors: **7**, down from 4008 (one per async span before).
-- Args-table load: ~14k annotation blocks / ~30k values, versus one-plus rows
-  per dep-array element before (100k+ for the dep arrays alone). Dep edges now
-  cost SQL rows only through a handful of blob strings.
-- Wire size is slightly *up* (1.51 MB vs 1.41 MB): the protobuf now also
-  carries the blob, the flows, and the action spans. Bytes were never the UI
-  bottleneck; rows were.
