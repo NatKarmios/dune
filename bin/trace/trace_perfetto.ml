@@ -276,8 +276,8 @@ module Async_phase = struct
   ;;
 end
 
-module P_arg = struct
-  include P.Arg
+module Debug_annot = struct
+  include P.Debug_annot
 
   let int_opt ~name s =
     match int_of_string_opt s with
@@ -309,10 +309,10 @@ module P_arg = struct
     | v -> json ~name:key (Json.to_string (Trace_common.Event_sexp.to_json v))
   ;;
 
-  let wrap_dune args =
-    match args with
+  let wrap_dune annots =
+    match annots with
     | [] -> []
-    | _ :: _ -> [ dict ~name:"dune" args ]
+    | _ :: _ -> [ dict ~name:"dune" annots ]
   ;;
 
   (* Massage particular fields on non-Graph events *)
@@ -565,7 +565,7 @@ let record_interns t rest =
   | _ -> ()
 ;;
 
-let push_instant t ~uuid ~track_name ~name ~ts ~flow_ids ~args =
+let push_instant t ~uuid ~track_name ~name ~ts ~flow_ids ~debug_annots =
   ensure_track t uuid ~parent_uuid:Track_uuid.process ~name:track_name;
   push
     t
@@ -573,7 +573,7 @@ let push_instant t ~uuid ~track_name ~name ~ts ~flow_ids ~args =
        (P.Event.create
           ~name
           ~categories:[ "graph" ]
-          ~args
+          ~debug_annots
           ~flow_ids
           P.Event.Type.Instant
           ~track_uuid:uuid
@@ -596,7 +596,7 @@ let collapses dur_ns = dur_ns < Lazy.force collapse_threshold_ns
 
 module Graph_span = struct
   module Exec_rule = struct
-    let instant t ~name ~ts ~flow_ids ~args =
+    let instant t ~name ~ts ~flow_ids ~debug_annots =
       push_instant
         t
         ~uuid:Track_uuid.exec_rule
@@ -604,7 +604,7 @@ module Graph_span = struct
         ~name
         ~ts
         ~flow_ids
-        ~args
+        ~debug_annots
     ;;
 
     let push_start t (b : Span.Rule.t) =
@@ -613,34 +613,25 @@ module Graph_span = struct
         ~name:"exec-rule-start"
         ~ts:b.begin_ts
         ~flow_ids:[ b.flow_id ]
-        ~args:(P_arg.wrap_dune (P_arg.rule_id b.rule_id))
+        ~debug_annots:(Debug_annot.wrap_dune (Debug_annot.rule_id b.rule_id))
     ;;
 
     let push_finish t ~ts (b : Span.Rule.t) ~rule_outcome =
-      let dur_ns = ts - b.begin_ts in
+      let dur = ts - b.begin_ts in
       let is_cache_hit =
         match rule_outcome with
         | Some ("local-cache-hit" | "shared-cache-hit") -> true
         | _ (* "executed", a failure/cancellation, or unfinished *) -> false
       in
-      if is_cache_hit && collapses dur_ns
+      let debug_annots = Debug_annot.(wrap_dune (rule_id b.rule_id @ [ dur_ns dur ])) in
+      if is_cache_hit && collapses dur
       then
         (* If a rule execution is very short and loaded from cache, then just
            emit one instant *)
-        instant
-          t
-          ~name:"exec-rule-resolved"
-          ~ts:b.begin_ts
-          ~flow_ids:[]
-          ~args:(P_arg.wrap_dune (P_arg.rule_id b.rule_id @ [ P_arg.dur_ns dur_ns ]))
+        instant t ~name:"exec-rule-resolved" ~ts:b.begin_ts ~flow_ids:[] ~debug_annots
       else (
         push_start t b;
-        instant
-          t
-          ~name:"exec-rule-finish"
-          ~ts
-          ~flow_ids:[ b.flow_id ]
-          ~args:(P_arg.wrap_dune (P_arg.rule_id b.rule_id @ [ P_arg.dur_ns dur_ns ])))
+        instant t ~name:"exec-rule-finish" ~ts ~flow_ids:[ b.flow_id ] ~debug_annots)
     ;;
 
     let record_begin t ~span_id ~ts rest =
@@ -717,7 +708,7 @@ module Graph_span = struct
     ;;
 
     module Action = struct
-      let instant t ~name ~ts ~flow_ids ~args =
+      let instant t ~name ~ts ~flow_ids ~debug_annots =
         push_instant
           t
           ~uuid:Track_uuid.exec_rule_action
@@ -725,7 +716,7 @@ module Graph_span = struct
           ~name
           ~ts
           ~flow_ids
-          ~args
+          ~debug_annots
       ;;
 
       let push_start t (b : Span.Action.t) =
@@ -734,7 +725,7 @@ module Graph_span = struct
           ~name:"exec-rule-action-start"
           ~ts:b.begin_ts
           ~flow_ids:b.flow_ids
-          ~args:(P_arg.wrap_dune (P_arg.rule_id b.rule_id))
+          ~debug_annots:Debug_annot.(wrap_dune (rule_id b.rule_id))
       ;;
 
       let push_finish t ~ts (b : Span.Action.t) =
@@ -744,9 +735,8 @@ module Graph_span = struct
           ~name:"exec-rule-action-finish"
           ~ts
           ~flow_ids:b.flow_ids
-          ~args:
-            (P_arg.wrap_dune
-               (P_arg.rule_id b.rule_id @ [ P_arg.dur_ns (ts - b.begin_ts) ]))
+          ~debug_annots:
+            Debug_annot.(wrap_dune (rule_id b.rule_id @ [ dur_ns (ts - b.begin_ts) ]))
       ;;
 
       let record_begin t ~span_id ~ts rest =
@@ -781,7 +771,7 @@ module Graph_span = struct
   end
 
   module Build_dep = struct
-    let instant t ~name ~ts ~flow_ids ~args =
+    let instant t ~name ~ts ~flow_ids ~debug_annots =
       push_instant
         t
         ~uuid:Track_uuid.build_dep
@@ -789,7 +779,7 @@ module Graph_span = struct
         ~name
         ~ts
         ~flow_ids
-        ~args
+        ~debug_annots
     ;;
 
     let push_start t (b : Span.Dep.t) =
@@ -798,34 +788,25 @@ module Graph_span = struct
         ~name:"build-dep-start"
         ~ts:b.begin_ts
         ~flow_ids:[ b.flow_id ]
-        ~args:(P_arg.wrap_dune (P_arg.dep_id b.dep))
+        ~debug_annots:Debug_annot.(wrap_dune (dep_id b.dep))
     ;;
 
     let push_finish t ~ts (b : Span.Dep.t) ~dep_resolution =
-      let dur_ns = ts - b.begin_ts in
+      let dur = ts - b.begin_ts in
       let is_source =
         match dep_resolution with
         | Some (Sexp.List (Atom "is-source" :: _)) -> true
         | _ -> false
       in
-      if is_source && collapses dur_ns
+      let debug_annots = Debug_annot.(wrap_dune (dep_id b.dep @ [ dur_ns dur ])) in
+      if is_source && collapses dur
       then
         (* If a dep build is trivially short and just loads a source file, then
            just emit one instant *)
-        instant
-          t
-          ~name:"build-dep-resolved"
-          ~ts:b.begin_ts
-          ~flow_ids:[]
-          ~args:(P_arg.wrap_dune (P_arg.dep_id b.dep @ [ P_arg.dur_ns dur_ns ]))
+        instant t ~name:"build-dep-resolved" ~ts:b.begin_ts ~flow_ids:[] ~debug_annots
       else (
         push_start t b;
-        instant
-          t
-          ~name:"build-dep-finish"
-          ~ts
-          ~flow_ids:[ b.flow_id ]
-          ~args:(P_arg.wrap_dune (P_arg.dep_id b.dep @ [ P_arg.dur_ns dur_ns ])))
+        instant t ~name:"build-dep-finish" ~ts ~flow_ids:[ b.flow_id ] ~debug_annots)
     ;;
 
     let record_begin t ~span_id ~ts rest =
@@ -876,7 +857,7 @@ module Graph_span = struct
   end
 
   module Gen_rules = struct
-    let instant t ~name ~ts ~flow_ids ~args =
+    let instant t ~name ~ts ~flow_ids ~debug_annots =
       push_instant
         t
         ~uuid:Track_uuid.gen_rules
@@ -884,7 +865,7 @@ module Graph_span = struct
         ~name
         ~ts
         ~flow_ids
-        ~args
+        ~debug_annots
     ;;
 
     let push_start t (b : Span.Gen_rules.t) =
@@ -893,23 +874,24 @@ module Graph_span = struct
         ~name:"gen-rules-start"
         ~ts:b.begin_ts
         ~flow_ids:[ b.flow_id ]
-        ~args:(P_arg.wrap_dune [ P_arg.string ~name:"dir" b.dir ])
+        ~debug_annots:Debug_annot.(wrap_dune [ string ~name:"dir" b.dir ])
     ;;
 
     let push_finish t ~ts (b : Span.Gen_rules.t) ~dune_file =
-      let dur_ns = ts - b.begin_ts in
+      let dur = ts - b.begin_ts in
       push_start t b;
       instant
         t
         ~name:"gen-rules-finish"
         ~ts
         ~flow_ids:[ b.flow_id ]
-        ~args:
-          (P_arg.wrap_dune
-             ((match dune_file with
-               | Some f -> [ P_arg.string ~name:"dune_file" f ]
-               | None -> [])
-              @ [ P_arg.dur_ns dur_ns ]))
+        ~debug_annots:
+          Debug_annot.(
+            wrap_dune
+              ((match dune_file with
+                | Some f -> [ string ~name:"dune_file" f ]
+                | None -> [])
+               @ [ dur_ns dur ]))
     ;;
 
     let record_begin t ~span_id ~ts rest =
@@ -942,7 +924,7 @@ module Graph_span = struct
   end
 
   module Dynamic_includes = struct
-    let instant t ~name ~ts ~flow_ids ~args =
+    let instant t ~name ~ts ~flow_ids ~debug_annots =
       push_instant
         t
         ~uuid:Track_uuid.dynamic_includes
@@ -950,7 +932,7 @@ module Graph_span = struct
         ~name
         ~ts
         ~flow_ids
-        ~args
+        ~debug_annots
     ;;
 
     let push_start t (b : Span.Dynamic_includes.t) =
@@ -959,18 +941,18 @@ module Graph_span = struct
         ~name:"dynamic-includes-start"
         ~ts:b.begin_ts
         ~flow_ids:[ b.flow_id ]
-        ~args:(P_arg.wrap_dune [ P_arg.string ~name:"dune_file" b.dune_file ])
+        ~debug_annots:Debug_annot.(wrap_dune [ string ~name:"dune_file" b.dune_file ])
     ;;
 
     let push_finish t ~ts (b : Span.Dynamic_includes.t) =
-      let dur_ns = ts - b.begin_ts in
+      let dur = ts - b.begin_ts in
       push_start t b;
       instant
         t
         ~name:"dynamic-includes-finish"
         ~ts
         ~flow_ids:[ b.flow_id ]
-        ~args:(P_arg.wrap_dune [ P_arg.dur_ns dur_ns ])
+        ~debug_annots:Debug_annot.(wrap_dune [ dur_ns dur ])
     ;;
 
     let record_begin t ~span_id ~ts rest =
@@ -1051,15 +1033,16 @@ let push_graph_section t ~name records =
       ~name
       ~ts:t.last_ts
       ~flow_ids:[]
-      ~args:
-        [ P_arg.dict
-            ~name:"dune"
-            [ P_arg.int ~name:"version" Graph_blob.version
-            ; P_arg.int ~name:"seq" seq
-            ; P_arg.int ~name:"total" total
-            ; P_arg.string ~name:"data" data
-            ]
-        ])
+      ~debug_annots:
+        Debug_annot.
+          [ dict
+              ~name:"dune"
+              [ int ~name:"version" Graph_blob.version
+              ; int ~name:"seq" seq
+              ; int ~name:"total" total
+              ; string ~name:"data" data
+              ]
+          ])
 ;;
 
 module Process = struct
@@ -1100,7 +1083,7 @@ module Process = struct
          (P.Event.create
             ~name
             ~categories:[ b.cat ]
-            ~args:(P_arg.map_rest ~name (b.fields @ rest))
+            ~debug_annots:(Debug_annot.map_rest ~name (b.fields @ rest))
             P.Event.Type.Begin
             ~track_uuid
             ~ts:b.begin_ts));
@@ -1151,7 +1134,7 @@ let add t sexp =
            | Async_phase.End -> Process.record_end t ~span_id ~ts:ts_ns rest)
         | _ -> ())
      | _ ->
-       let args = P_arg.map_rest ~name rest in
+       let debug_annots = Debug_annot.map_rest ~name rest in
        let open P.Event.Type in
        let track_uuid = Track_uuid.main_thread in
        (match dur with
@@ -1163,7 +1146,7 @@ let add t sexp =
                (P.Event.create
                   ~name
                   ~categories:[ cat ]
-                  ~args
+                  ~debug_annots
                   Begin
                   ~track_uuid
                   ~ts:ts_ns));
@@ -1175,7 +1158,7 @@ let add t sexp =
                (P.Event.create
                   ~name
                   ~categories:[ cat ]
-                  ~args
+                  ~debug_annots
                   Instant
                   ~track_uuid
                   ~ts:ts_ns))))

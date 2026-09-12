@@ -19,7 +19,7 @@
 
 (** A key/value annotation attached to an event (Perfetto's
     [DebugAnnotation]). *)
-module Arg : sig
+module Debug_annot : sig
   type t
 
   val bool : name:string -> bool -> t
@@ -65,7 +65,7 @@ module Event : sig
   val create
     :  ?name:string
     -> ?categories:string list
-    -> ?args:Arg.t list
+    -> ?debug_annots:Debug_annot.t list
     -> ?flow_ids:int list
     -> Type.t
     -> track_uuid:int

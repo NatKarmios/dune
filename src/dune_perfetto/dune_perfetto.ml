@@ -5,7 +5,7 @@ module String = StringLabels
    [to_bytes] and [to_text] both consume them (after [Interned.packets]
    rewrites strings to interned ids). *)
 
-module Arg = struct
+module Debug_annot = struct
   type value =
     | Bool of bool
     | Int of int
@@ -16,17 +16,17 @@ module Arg = struct
     | Array of t list
 
   and t =
-    { arg_name : string
+    { annot_name : string
     ; value : value
     }
 
-  let bool ~name b = { arg_name = name; value = Bool b }
-  let int ~name i = { arg_name = name; value = Int i }
-  let float ~name f = { arg_name = name; value = Float f }
-  let string ~name s = { arg_name = name; value = String s }
-  let json ~name s = { arg_name = name; value = Json s }
-  let dict ~name xs = { arg_name = name; value = Dict xs }
-  let array ~name xs = { arg_name = name; value = Array xs }
+  let bool ~name b = { annot_name = name; value = Bool b }
+  let int ~name i = { annot_name = name; value = Int i }
+  let float ~name f = { annot_name = name; value = Float f }
+  let string ~name s = { annot_name = name; value = String s }
+  let json ~name s = { annot_name = name; value = Json s }
+  let dict ~name xs = { annot_name = name; value = Dict xs }
+  let array ~name xs = { annot_name = name; value = Array xs }
 end
 
 module Track = struct
@@ -77,17 +77,32 @@ module Event = struct
   end
 
   type t =
-    { etype : Type.t
-    ; ename : string option
+    { event_type : Type.t
+    ; event_name : string option
     ; categories : string list
-    ; eargs : Arg.t list
+    ; debug_annots : Debug_annot.t list
     ; flow_ids : int list
     ; track_uuid : int
     ; ts : int
     }
 
-  let create ?name ?(categories = []) ?(args = []) ?(flow_ids = []) type_ ~track_uuid ~ts =
-    { etype = type_; ename = name; categories; eargs = args; flow_ids; track_uuid; ts }
+  let create
+        ?name
+        ?(categories = [])
+        ?(debug_annots = [])
+        ?(flow_ids = [])
+        type_
+        ~track_uuid
+        ~ts
+    =
+    { event_type = type_
+    ; event_name = name
+    ; categories
+    ; debug_annots
+    ; flow_ids
+    ; track_uuid
+    ; ts
+    }
   ;;
 end
 
@@ -110,7 +125,7 @@ let seq_needs_incremental_state = 2
    the entries first introduced on each packet are gathered for its
    [interned_data]. See [packets]. *)
 module Interned = struct
-  module Raw_arg = Arg
+  module Raw_annot = Debug_annot
 
   (* The interned entries introduced by a single packet, gathered from the
      tables below by [Tables.take]. *)
@@ -134,7 +149,7 @@ module Interned = struct
     ;;
   end
 
-  module Arg = struct
+  module Debug_annot = struct
     type value =
       | Bool of bool
       | Int of int
@@ -154,7 +169,7 @@ module Interned = struct
     { type_ : Event.Type.t
     ; name_iid : int option
     ; category_iids : int list
-    ; args : Arg.t list
+    ; debug_annots : Debug_annot.t list
     ; flow_ids : int list
     ; track_uuid : int
     ; ts : int
@@ -243,34 +258,51 @@ module Interned = struct
     ;;
   end
 
-  let rec arg ~tbls ~named { Raw_arg.arg_name; value } =
+  let rec debug_annot ~tbls ~named { Raw_annot.annot_name; value } =
     let name_iid =
-      if named && arg_name <> ""
-      then Some (Tables.intern_annotation_name tbls arg_name)
+      if named && annot_name <> ""
+      then Some (Tables.intern_annotation_name tbls annot_name)
       else None
     in
-    let value : Arg.value =
+    let value : Debug_annot.value =
       match value with
-      | Raw_arg.Bool b -> Bool b
+      | Raw_annot.Bool b -> Bool b
       | Int i -> Int i
       | Float f -> Float f
       | String s -> String_iid (Tables.intern_annotation_string tbls s)
       | Json s -> Json s
-      | Dict entries -> Dict (List.map entries ~f:(arg ~tbls ~named:true))
-      | Array entries -> Array (List.map entries ~f:(arg ~tbls ~named:false))
+      | Dict entries -> Dict (List.map entries ~f:(debug_annot ~tbls ~named:true))
+      | Array entries -> Array (List.map entries ~f:(debug_annot ~tbls ~named:false))
     in
-    { Arg.name_iid; value }
+    { Debug_annot.name_iid; value }
   ;;
 
-  let event ~tbls { Event.etype; ename; categories; eargs; flow_ids; track_uuid; ts } =
-    let name_iid = Option.map (Tables.intern_event_name tbls) ename in
+  let event
+        ~tbls
+        { Event.event_type
+        ; event_name
+        ; categories
+        ; debug_annots
+        ; flow_ids
+        ; track_uuid
+        ; ts
+        }
+    =
+    let name_iid = Option.map (Tables.intern_event_name tbls) event_name in
     let category_iids = List.map categories ~f:(Tables.intern_event_category tbls) in
-    let args = List.map eargs ~f:(arg ~tbls ~named:true) in
+    let debug_annots = List.map debug_annots ~f:(debug_annot ~tbls ~named:true) in
     let interned = Tables.take tbls in
     let sequence_flags = Tables.sequence_flags tbls in
     ITrack_event
       { ievent =
-          { type_ = etype; name_iid; category_iids; args; flow_ids; track_uuid; ts }
+          { type_ = event_type
+          ; name_iid
+          ; category_iids
+          ; debug_annots
+          ; flow_ids
+          ; track_uuid
+          ; ts
+          }
       ; interned
       ; sequence_flags
       }
@@ -358,7 +390,7 @@ module To_bytes = struct
 
   (* DebugAnnotation. In an array the entries carry no name; a string value is
      interned via [string_value_iid] (field 17). *)
-  let rec arg buf { Interned.Arg.name_iid; value } =
+  let rec debug_annot buf { Interned.Debug_annot.name_iid; value } =
     (match name_iid with
      | Some iid -> Wire.varint_field buf ~field:1 iid
      | None -> ());
@@ -368,9 +400,11 @@ module To_bytes = struct
     | Float f -> Wire.double_field buf ~field:5 f
     | Json s -> Wire.string_field buf ~field:9 s
     | Dict entries ->
-      List.iter entries ~f:(fun e -> Wire.message_field buf ~field:11 (fun b -> arg b e))
+      List.iter entries ~f:(fun e ->
+        Wire.message_field buf ~field:11 (fun b -> debug_annot b e))
     | Array entries ->
-      List.iter entries ~f:(fun e -> Wire.message_field buf ~field:12 (fun b -> arg b e))
+      List.iter entries ~f:(fun e ->
+        Wire.message_field buf ~field:12 (fun b -> debug_annot b e))
     | String_iid iid -> Wire.varint_field buf ~field:17 iid
   ;;
 
@@ -381,7 +415,8 @@ module To_bytes = struct
      | None -> ());
     List.iter e.category_iids ~f:(fun iid -> Wire.varint_field buf ~field:3 iid);
     Wire.varint_field buf ~field:11 e.track_uuid;
-    List.iter e.args ~f:(fun a -> Wire.message_field buf ~field:4 (fun b -> arg b a));
+    List.iter e.debug_annots ~f:(fun a ->
+      Wire.message_field buf ~field:4 (fun b -> debug_annot b a));
     List.iter e.flow_ids ~f:(fun id -> Wire.fixed64_field buf ~field:47 (Int64.of_int id))
   ;;
 
@@ -449,7 +484,7 @@ module To_text = struct
       fmt
   ;;
 
-  let rec arg b indent { Interned.Arg.name_iid; value } =
+  let rec debug_annot b indent { Interned.Debug_annot.name_iid; value } =
     let line fmt = line b indent fmt in
     (match name_iid with
      | Some iid -> line "name_iid: %d" iid
@@ -463,12 +498,12 @@ module To_text = struct
     | Dict entries ->
       List.iter entries ~f:(fun e ->
         line "dict_entries {";
-        arg b (indent + 1) e;
+        debug_annot b (indent + 1) e;
         line "}")
     | Array entries ->
       List.iter entries ~f:(fun e ->
         line "array_values {";
-        arg b (indent + 1) e;
+        debug_annot b (indent + 1) e;
         line "}")
   ;;
 
@@ -503,9 +538,9 @@ module To_text = struct
      | None -> ());
     List.iter e.category_iids ~f:(fun iid -> line "category_iids: %d" iid);
     line "track_uuid: %d" e.track_uuid;
-    List.iter e.args ~f:(fun a ->
+    List.iter e.debug_annots ~f:(fun a ->
       line "debug_annotations {";
-      arg b (indent + 1) a;
+      debug_annot b (indent + 1) a;
       line "}");
     List.iter e.flow_ids ~f:(fun id -> line "flow_ids: %d" id)
   ;;
