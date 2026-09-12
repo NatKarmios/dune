@@ -30,7 +30,7 @@ module Category : sig
 end
 
 module Event : sig
-  module Async : sig
+  module Complete : sig
     type t
     type data
 
@@ -39,10 +39,13 @@ module Event : sig
     val pkg_load_lock_dir : path:string -> data
   end
 
-  type t
-  type async_id
+  module Async : sig
+    type id
 
-  val gen_async_id : unit -> async_id
+    val gen_id : unit -> id
+  end
+
+  type t
 
   (** What forced the build a span belongs to. Recorded on graph spans and on
       process spans alike. *)
@@ -89,7 +92,7 @@ module Event : sig
     (** Emitted at [started_at], carrying everything known at spawn time. *)
     val start
       :  extra_args:(string * Sexp.t) list
-      -> async_id:async_id
+      -> async_id:Async.id
       -> forced_by:Forced_by.t option
       -> pid:Pid.t
       -> dir:Path.t option
@@ -106,7 +109,7 @@ module Event : sig
     (** [stop] must be the process's own end time, not the time of the call,
         so that the span covers exactly the process's lifetime. *)
     val finish
-      :  async_id:async_id
+      :  async_id:Async.id
       -> stop:Time.t
       -> exit:Exit_status.t
       -> stdout:string
@@ -319,13 +322,13 @@ module Event : sig
       end
 
       val start
-        :  async_id:async_id
+        :  async_id:Async.id
         -> forced_by:Forced_by.t option
         -> dep:string
         -> t list
 
       val finish
-        :  async_id:async_id
+        :  async_id:Async.id
         -> resolution:Resolution.t
         -> status:Status.t
         -> t list
@@ -352,7 +355,7 @@ module Event : sig
       end
 
       val start
-        :  async_id:async_id
+        :  async_id:Async.id
         -> rule_id:int
         -> dir:string
         -> target_files:string list
@@ -362,7 +365,7 @@ module Event : sig
         -> t list
 
       val finish
-        :  async_id:async_id
+        :  async_id:Async.id
         -> rule_id:int
         -> deps:Deps.t
         -> outcome:Outcome.t
@@ -370,18 +373,18 @@ module Event : sig
     end
 
     module Exec_rule_action : sig
-      val start : async_id:async_id -> rule_id:int -> start:Time.t -> t
-      val finish : async_id:async_id -> t
+      val start : async_id:Async.id -> rule_id:int -> start:Time.t -> t
+      val finish : async_id:Async.id -> t
     end
 
     module Dynamic_includes : sig
-      val start : async_id:async_id -> dune_file:Path.Source.t -> start:Time.t -> t
-      val finish : async_id:async_id -> t
+      val start : async_id:Async.id -> dune_file:Path.Source.t -> start:Time.t -> t
+      val finish : async_id:Async.id -> t
     end
 
     module Gen_rules : sig
-      val start : async_id:async_id -> dir:Path.Build.t -> start:Time.t -> t
-      val finish : async_id:async_id -> dune_file:Path.Source.t option -> t
+      val start : async_id:Async.id -> dir:Path.Build.t -> start:Time.t -> t
+      val finish : async_id:Async.id -> dune_file:Path.Source.t option -> t
     end
   end
 end
@@ -410,8 +413,8 @@ module Out : sig
 
   val create : [ `Path of Path.t | `Fd of Fd.t ] -> t
   val emit : ?buffered:bool -> t -> Event.t -> unit
-  val start : t option -> (unit -> Event.Async.data) -> Event.Async.t option
-  val finish : t -> Event.Async.t option -> unit
+  val start : t option -> (unit -> Event.Complete.data) -> Event.Complete.t option
+  val finish : t -> Event.Complete.t option -> unit
 end
 
 val global : unit -> Out.t option

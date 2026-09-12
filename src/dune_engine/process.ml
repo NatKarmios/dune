@@ -830,7 +830,7 @@ let targets_of_purpose (purpose : Process_metadata.purpose) =
 type trace =
   | No_trace
   | Trace of
-      { async_id : Dune_trace.Event.async_id
+      { async_id : Dune_trace.Event.Async.id
       ; forced_by : Forced_by.t option
       }
 
@@ -1222,7 +1222,7 @@ let run_internal
     (* The span pairing the process's begin and end, and the forcer to record
        on the begin. Both branches below need them, and reading the forcer
        needs the fiber context we are in here. *)
-    let async_id = Dune_trace.Event.gen_async_id () in
+    let async_id = Dune_trace.Event.Async.gen_id () in
     let* forced_by =
       if Dune_trace.enabled Process then Forced_by.get else Fiber.return None
     in

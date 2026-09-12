@@ -66,7 +66,7 @@ module Build_dep = struct
     =
     if enabled Category.Graph
     then (
-      let async_id = Event.gen_async_id () in
+      let async_id = Event.Async.gen_id () in
       let new_forcer = Forced_by.dep ~dep in
       let open Fiber.O in
       (let* forced_by = Forced_by.get in
@@ -237,7 +237,7 @@ module Exec_rule = struct
     if enabled Category.Graph
     then (
       let new_forcer = Forced_by.rule ~rule in
-      let async_id = Event.gen_async_id () in
+      let async_id = Event.Async.gen_id () in
       let rule_id = Rule.Id.to_int rule.id in
       let open Fiber.O in
       (let* forced_by = Forced_by.get in
@@ -301,7 +301,7 @@ module Dynamic_includes = struct
   let start ~(dune_file : Path.Source.t) (f : unit -> 'a Memo.t) : 'a Memo.t =
     if enabled Category.Graph
     then (
-      let async_id = Event.gen_async_id () in
+      let async_id = Event.Async.gen_id () in
       let new_forcer = Forced_by.dynamic_includes ~dune_file in
       let start = Time.now () in
       Dune_trace.emit ~buffered:true Category.Graph (fun () ->
@@ -320,7 +320,7 @@ module Gen_rules = struct
   let start ~(dir : Path.Build.t) (f : (Path.Source.t -> unit) -> 'a Memo.t) : 'a Memo.t =
     if enabled Category.Graph
     then (
-      let async_id = Event.gen_async_id () in
+      let async_id = Event.Async.gen_id () in
       let new_forcer = Forced_by.gen_rules ~dir in
       let start = Time.now () in
       Dune_trace.emit ~buffered:true Category.Graph (fun () ->

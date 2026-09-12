@@ -95,17 +95,19 @@ module Event = struct
   ;;
 end
 
-type async_id = int
-
-let async_next_id = ref 0
-
-let gen_async_id () =
-  let id = !async_next_id in
-  incr async_next_id;
-  id
-;;
-
 module Async = struct
+  type id = int
+
+  let next_id = ref 0
+
+  let gen_id () =
+    let id = !next_id in
+    incr next_id;
+    id
+  ;;
+end
+
+module Complete = struct
   type data =
     { args : Event.args option
     ; cat : Category.t
