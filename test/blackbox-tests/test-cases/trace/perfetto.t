@@ -202,7 +202,7 @@ sources):
   yes
 
 A fresh flow id per non-collapsed span chains its lifecycle events (see
-doc/dev/trace-graph-perfetto.md, phase 4). Event names are interned, so
+doc/dev/trace-graph-perfetto.md). Event names are interned, so
 resolving `name_iid` against the `event_names` table gives, for each
 `flow_ids` occurrence, "<flow id> <event name> <event type>". Two parsing
 subtleties: a name is interned by its first user, i.e. its `interned_data`
@@ -295,10 +295,9 @@ is a plain path in the event, not an interned id, and stays one:
   $ grep -q 'str: "_build/default/dep.txt"' dump.textpb && echo yes
   [1]
 
-Per the arg-slimming in doc/dev/trace-graph-perfetto.md (phases 2 and 7),
-`deps`, `dyn_deps`, `target_files`, `target_dirs`, and expansion
-lists no longer appear on instants at all -- they are blob-only now (see
-below). In particular, "out.txt" (a `target_files` entry) no longer appears
+Instants carry ids and `dur_ns` only (see doc/dev/trace-graph-perfetto.md),
+so `deps`, `dyn_deps`, `target_files`, `target_dirs`, and expansion lists do
+not appear on them at all -- they are blob-only (see below). In particular, "out.txt" (a `target_files` entry) no longer appears
 anywhere in the plain protobuf text as its own interned string; it only shows
 up encoded inside the blob's `data` payload. Its full path is still interned
 once, but as a *user-requested* target on the `targets` event -- those are
@@ -336,8 +335,8 @@ Recognised structural fields are grouped under a "dune" dict (surfacing as e.g.
 
 A rule's outcome and a dep's resolution are blob fields, so neither the
 tagged-union dicts of the csexp events (`rule_outcome`, `dep_outcome`,
-`forced_by`'s `kind` tag) nor the flattened strings that replaced them in
-phase 2 (`outcome`, `outcome_kind`) reach the instants:
+`forced_by`'s `kind` tag) nor flattened strings of them (`outcome`,
+`outcome_kind`) reach the instants:
 
   $ grep -q 'str: "executed"' dump.textpb && echo yes
   [1]
@@ -544,9 +543,8 @@ each such event is its dep:
   $ first_int_arg build-dep-start | sort -u | grep -qx "$dep_id" && echo yes
   yes
 
-`version` is the first int arg of a section instant, and stays 1: the dep-set
-sections were folded into the v1 schema rather than bumped onto a v2, the
-contract not having shipped to the plugin yet (see
+`version` is the first int arg of every section instant, and is 1 -- the
+schema version the blob's consumers read (see
 doc/dev/trace-graph-perfetto.md):
 
   $ first_int_arg graph-rules | sort -u
