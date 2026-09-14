@@ -13,6 +13,26 @@ turns it into a browsable graph on top of the ordinary timeline;
 [see here](https://github.com/NatKarmios/perfetto/blob/dune-graph-trace/ui/src/plugins/com.karmios.nat.DuneGraph/README.md)
 for more information.
 
+## Not supported yet: watch mode and multiple contexts
+
+The blob schema assumes every unit of work happens exactly once per trace:
+one `graph-rules` line per rule, one `graph-deps` line per dep, one
+`gen-rules` span per directory. Two situations break that assumption.
+
+In **watch mode**, each iteration re-runs the rules whose inputs changed, so a
+target can appear as several `graph-rules` lines with different `rule_id`s
+(and a directory as several `gen-rules` spans), with nothing in the trace
+saying which iteration a line belongs to.
+
+In a **multi-context build**, rule generation and rule execution are keyed on
+the build directory, which includes the context name — `_build/default/foo`
+and `_build/alt/foo` are distinct work. The ids are still distinct, so the
+graph is not wrong, but nothing groups a line by its context.
+
+Record single-shot, single-context builds until the schema carries an
+iteration and a context. A consumer that sees repeats can key graph nodes on
+resolved target paths, but merging across iterations is its own problem.
+
 ## Producing a trace
 
 The `graph` category is off by default; enable it for the build you want to
@@ -309,10 +329,9 @@ rule's span by construction.
   queueing included — not worker occupancy. Peak concurrent action spans is
   the size of the ready set. The `process` events carry the throttled run
   intervals and each process's `queued` duration.
-- **`rule_id` and `set_id` are per-process.** In watch mode the same target
-  can produce several `graph-rules` lines across iterations, with different
-  `rule_id`s. Key graph nodes on resolved target paths when merging across
-  iterations.
+- **`rule_id` and `set_id` are per-process.** They are not stable across
+  invocations, and within one invocation they do not identify a repeated unit
+  of work (see the watch-mode and multi-context note above).
 - **Dep sets are sets.** Ids within a core or an adds list are sorted and
   duplicate-free, so a rule's dependency *declaration order* is not
   recoverable from the blob.
