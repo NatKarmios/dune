@@ -113,12 +113,14 @@ On `build-dep`:
 - `build-dep-finish`: `dep_id`, `dur_ns`.
 - `build-dep-resolved`: collapsed form; `dep_id`, `dur_ns`.
 
-On `gen-rules` / `dynamic-includes` (no blob record, so these carry the path
-that identifies them, as a plain string):
+On `gen-rules` / `dynamic-includes` (no blob record, so these carry the
+`graph-dict` intern id of the path that identifies them, on both ends of the
+span, so that either instant on its own says which span it belongs to):
 
-- `gen-rules-start`: `dir`. `gen-rules-finish`: `dune_file` (when known),
-  `dur_ns`.
-- `dynamic-includes-start`: `dune_file`. `dynamic-includes-finish`: `dur_ns`.
+- `gen-rules-start`: `dir_path_id`. `gen-rules-finish`: `dir_path_id`,
+  `dune_file_path_id` (when known), `dur_ns`.
+- `dynamic-includes-start`: `dune_file_path_id`.
+  `dynamic-includes-finish`: `dune_file_path_id`, `dur_ns`.
 
 An instant carries its blob record's key and `dur_ns`, and nothing else:
 outcomes, resolutions, targets, deps, and the paths behind the ids are all one
@@ -335,8 +337,8 @@ rule's span by construction.
 - **Dep sets are sets.** Ids within a core or an adds list are sorted and
   duplicate-free, so a rule's dependency *declaration order* is not
   recoverable from the blob.
-- **`graph-dict` is not filtered** to the ids `graph-rules`/`graph-deps`
-  reference. This is harmless: `intern` events only cover strings the graph
+- **`graph-dict` is not filtered** to the ids the graph lines and the
+  `*_path_id` instant args reference. This is harmless: `intern` events only cover strings the graph
   category actually used.
 - **The converter buffers all packets in memory.** Multi-GB csexp inputs may
   eventually need a streaming writer.

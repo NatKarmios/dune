@@ -167,6 +167,35 @@ single entry, not expanded into the files it matches:
   > '
   ["_build/default/dep.txt","_build/default@my-alias","_build/default/*.src"]
 
+Both ends of a "gen-rules" span carry the directory as an interned "dir" id,
+so either event on its own says which directory it belongs to. The end event
+additionally carries the interned "dune_file" that drove the directory, when
+there is one:
+
+  $ dune trace cat | jq -sr '
+  >   [ .[] | select(.name == "gen-rules") ] | all(.args.dir != null)
+  > '
+  true
+
+  $ dune trace cat | jq -sc '
+  >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
+  >     ({}; .[$e.id | tostring] = $e.value)) as $names
+  >   | [ .[] | select(.name == "gen-rules")
+  >       | select($names[.args.dir | tostring] == "_build/default")
+  >       | .async_phase ]
+  >   | unique
+  > '
+  ["begin","end"]
+
+  $ dune trace cat | jq -sc '
+  >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
+  >     ({}; .[$e.id | tostring] = $e.value)) as $names
+  >   | [ .[] | select(.name == "gen-rules" and .async_phase == "end")
+  >       | select($names[.args.dir | tostring] == "_build/default")
+  >       | $names[.args.dune_file | tostring] ]
+  > '
+  ["dune"]
+
 A rebuild with nothing changed resolves every rule from cache: exec-rule spans
 are still emitted (with cache-hit outcomes), but no action runs, so there are
 no exec-rule-action events at all:

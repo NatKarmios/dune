@@ -182,14 +182,15 @@ Lifecycle instants carry minimal data: the id keying its blob record, and
   build-dep-resolved TYPE_INSTANT dep_id,dur_ns
   build-dep-start TYPE_INSTANT dep_id
 
-gen-rules and dynamic-includes have no blob record, so they keep the path
-that identifies them (`dir`, and the `dune_file` a standalone/group-root
-directory's rules come from -- other directories' finishes have none):
+gen-rules and dynamic-includes have no blob record, so they keep the intern
+id of the path that identifies them, on both ends of the span (`dir_path_id`,
+and the `dune_file_path_id` a standalone/group-root directory's rules come
+from -- other directories' finishes have none):
 
   $ event_args | sort -u | grep '^gen-rules'
-  gen-rules-finish TYPE_INSTANT dune_file,dur_ns
-  gen-rules-finish TYPE_INSTANT dur_ns
-  gen-rules-start TYPE_INSTANT dir
+  gen-rules-finish TYPE_INSTANT dir_path_id,dune_file_path_id,dur_ns
+  gen-rules-finish TYPE_INSTANT dir_path_id,dur_ns
+  gen-rules-start TYPE_INSTANT dir_path_id
 
 Starts and finishes balance (the exact count isn't stable: besides the three
 project rules, a fresh build also executes internal rules such as the
@@ -275,8 +276,7 @@ The lifecycle instants' fields become debug annotations. The annotation names
 and string values are themselves interned (`name_iid` /
 `string_value_iid`). The ids on exec-rule/build-dep instants are left as the
 intern ids they arrive as -- the blob's dict is what resolves them -- so no
-target or dep path is interned as a string of its own here; gen-rules' `dir`
-is a plain path in the event, not an interned id, and stays one:
+target, dep, or gen-rules path is interned as a string of its own here:
 
   $ grep -q 'debug_annotation_names {' dump.textpb && echo yes
   yes
@@ -288,10 +288,10 @@ is a plain path in the event, not an interned id, and stays one:
   yes
   $ grep -q 'name: "dep"' dump.textpb && echo yes
   [1]
-  $ grep -q 'name: "dir"' dump.textpb && echo yes
+  $ grep -q 'name: "dir_path_id"' dump.textpb && echo yes
   yes
   $ grep -q 'str: "_build/default"' dump.textpb && echo yes
-  yes
+  [1]
   $ grep -q 'str: "_build/default/dep.txt"' dump.textpb && echo yes
   [1]
 
@@ -367,15 +367,19 @@ events reference it:
 
   $ grep -c 'sequence_flags: 3' dump.textpb
   1
-  $ grep -c 'str: "_build/default"$' dump.textpb
+  $ grep -c 'str: "_build/default/out.txt"$' dump.textpb
   1
 
-`_build/default` above is one such string, named by every `gen-rules-start`
-in the default context. Paths that arrive as intern ids (rule dirs, deps) are
-no longer resolved onto instants, so they are not in the string pool at all
--- the blob's dict is their only copy:
+`_build/default/out.txt` above is one such string, carried as a real path by
+the `targets` event. Paths that arrive as intern ids (rule dirs, deps,
+gen-rules directories and dune files) are no longer resolved onto instants,
+so they are not in the string pool at all -- the blob's dict is their only
+copy:
 
   $ grep -c 'str: "_build/default/dep.txt"' dump.textpb
+  0
+  [1]
+  $ grep -c 'str: "_build/default"$' dump.textpb
   0
   [1]
 

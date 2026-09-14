@@ -304,12 +304,12 @@ module Dynamic_includes = struct
       let async_id = Event.Async.gen_id () in
       let new_forcer = Forced_by.dynamic_includes ~dune_file in
       let start = Time.now () in
-      Dune_trace.emit ~buffered:true Category.Graph (fun () ->
+      Dune_trace.emit_all ~buffered:true Category.Graph (fun () ->
         Graph.Dynamic_includes.start ~async_id ~dune_file ~start);
       let open Fiber.O in
       (let+ result = Forced_by.set ~new_forcer f () in
-       Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-         Graph.Dynamic_includes.finish ~async_id);
+       Dune_trace.emit_all ~buffered:true Category.Graph (fun () ->
+         Graph.Dynamic_includes.finish ~async_id ~dune_file);
        result)
       |> Memo.of_reproducible_fiber)
     else f ()
@@ -323,14 +323,14 @@ module Gen_rules = struct
       let async_id = Event.Async.gen_id () in
       let new_forcer = Forced_by.gen_rules ~dir in
       let start = Time.now () in
-      Dune_trace.emit ~buffered:true Category.Graph (fun () ->
+      Dune_trace.emit_all ~buffered:true Category.Graph (fun () ->
         Graph.Gen_rules.start ~async_id ~dir ~start);
       let dune_file = ref None in
       let report_dune_file df = dune_file := Some df in
       let open Fiber.O in
       (let+ result = Forced_by.set ~new_forcer f report_dune_file in
-       Dune_trace.emit ~buffered:true Category.Graph (fun () ->
-         Graph.Gen_rules.finish ~async_id ~dune_file:!dune_file);
+       Dune_trace.emit_all ~buffered:true Category.Graph (fun () ->
+         Graph.Gen_rules.finish ~async_id ~dir ~dune_file:!dune_file);
        result)
       |> Memo.of_reproducible_fiber)
     else f ignore

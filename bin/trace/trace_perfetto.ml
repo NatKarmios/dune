@@ -291,6 +291,8 @@ module Debug_annot = struct
 
   let rule_id s = int_opt ~name:"rule_id" s
   let dep_id s = int_opt ~name:"dep_id" s
+  let dir_path_id s = int_opt ~name:"dir_path_id" s
+  let dune_file_path_id s = int_opt ~name:"dune_file_path_id" s
   let dur_ns n = int ~name:"dur_ns" n
 
   let scalar key = function
@@ -874,7 +876,7 @@ module Graph_span = struct
         ~name:"gen-rules-start"
         ~ts:b.begin_ts
         ~flow_ids:[ b.flow_id ]
-        ~debug_annots:Debug_annot.(wrap_dune [ string ~name:"dir" b.dir ])
+        ~debug_annots:Debug_annot.(wrap_dune (dir_path_id b.dir))
     ;;
 
     let push_finish t ~ts (b : Span.Gen_rules.t) ~dune_file =
@@ -888,9 +890,10 @@ module Graph_span = struct
         ~debug_annots:
           Debug_annot.(
             wrap_dune
-              ((match dune_file with
-                | Some f -> [ string ~name:"dune_file" f ]
-                | None -> [])
+              (dir_path_id b.dir
+               @ (match dune_file with
+                  | Some f -> dune_file_path_id f
+                  | None -> [])
                @ [ dur_ns dur ]))
     ;;
 
@@ -941,7 +944,7 @@ module Graph_span = struct
         ~name:"dynamic-includes-start"
         ~ts:b.begin_ts
         ~flow_ids:[ b.flow_id ]
-        ~debug_annots:Debug_annot.(wrap_dune [ string ~name:"dune_file" b.dune_file ])
+        ~debug_annots:Debug_annot.(wrap_dune (dune_file_path_id b.dune_file))
     ;;
 
     let push_finish t ~ts (b : Span.Dynamic_includes.t) =
@@ -952,7 +955,8 @@ module Graph_span = struct
         ~name:"dynamic-includes-finish"
         ~ts
         ~flow_ids:[ b.flow_id ]
-        ~debug_annots:Debug_annot.(wrap_dune [ dur_ns dur ])
+        ~debug_annots:
+          Debug_annot.(wrap_dune (dune_file_path_id b.dune_file @ [ dur_ns dur ]))
     ;;
 
     let record_begin t ~span_id ~ts rest =

@@ -378,13 +378,18 @@ module Event : sig
     end
 
     module Dynamic_includes : sig
-      val start : async_id:Async.id -> dune_file:Path.Source.t -> start:Time.t -> t
-      val finish : async_id:Async.id -> t
+      val start : async_id:Async.id -> dune_file:Path.Source.t -> start:Time.t -> t list
+      val finish : async_id:Async.id -> dune_file:Path.Source.t -> t list
     end
 
     module Gen_rules : sig
-      val start : async_id:Async.id -> dir:Path.Build.t -> start:Time.t -> t
-      val finish : async_id:Async.id -> dune_file:Path.Source.t option -> t
+      val start : async_id:Async.id -> dir:Path.Build.t -> start:Time.t -> t list
+
+      val finish
+        :  async_id:Async.id
+        -> dir:Path.Build.t
+        -> dune_file:Path.Source.t option
+        -> t list
     end
   end
 end

@@ -1291,38 +1291,52 @@ module Graph = struct
     ;;
   end
 
+  (* The path identifying a [gen-rules] or [dynamic-includes] span is on both
+     its begin and its end event, so that either one on its own says which
+     span it belongs to. *)
+  let dune_file_arg ~ts dune_file =
+    let intern_events, id = Intern.string ~ts (Path.Source.to_string dune_file) in
+    intern_events, [ "dune_file", Arg.int id ]
+  ;;
+
   module Dynamic_includes = struct
     let start ~async_id ~dune_file ~start =
-      Event.async_begin
-        ~args:[ "dune_file", Arg.source_path dune_file ]
-        ~async_id
-        ~name:"dynamic-includes"
-        start
-        Graph
+      let intern_events, args = dune_file_arg ~ts:start dune_file in
+      intern_events
+      @ [ Event.async_begin ~args ~async_id ~name:"dynamic-includes" start Graph ]
     ;;
 
-    let finish ~async_id =
-      Event.async_end ~async_id ~name:"dynamic-includes" (Time.now ()) Graph
+    let finish ~async_id ~dune_file =
+      let ts = Time.now () in
+      let intern_events, args = dune_file_arg ~ts dune_file in
+      intern_events
+      @ [ Event.async_end ~args ~async_id ~name:"dynamic-includes" ts Graph ]
     ;;
   end
 
   module Gen_rules = struct
-    let start ~async_id ~dir ~start =
-      Event.async_begin
-        ~args:[ "dir", Arg.build_path dir ]
-        ~async_id
-        ~name:"gen-rules"
-        start
-        Graph
+    let dir_arg ~ts dir =
+      let intern_events, id = Intern.string ~ts (Path.Build.to_string dir) in
+      intern_events, [ "dir", Arg.int id ]
     ;;
 
-    let finish ~async_id ~dune_file =
-      let args =
+    let start ~async_id ~dir ~start =
+      let intern_events, args = dir_arg ~ts:start dir in
+      intern_events @ [ Event.async_begin ~args ~async_id ~name:"gen-rules" start Graph ]
+    ;;
+
+    let finish ~async_id ~dir ~dune_file =
+      let ts = Time.now () in
+      let dir_intern_events, dir_args = dir_arg ~ts dir in
+      let dune_file_intern_events, dune_file_args =
         match dune_file with
-        | None -> []
-        | Some dune_file -> [ "dune_file", Arg.source_path dune_file ]
+        | None -> [], []
+        | Some dune_file -> dune_file_arg ~ts dune_file
       in
-      Event.async_end ~args ~async_id ~name:"gen-rules" (Time.now ()) Graph
+      let args = dir_args @ dune_file_args in
+      dir_intern_events
+      @ dune_file_intern_events
+      @ [ Event.async_end ~args ~async_id ~name:"gen-rules" ts Graph ]
     ;;
   end
 end
