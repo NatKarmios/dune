@@ -573,7 +573,13 @@ let gen_automatic_subdir_rules sctx ~dir ~nearest_src_dir ~src_dir =
   | Some kind -> Rules.collect_unit (fun () -> Automatic_subdir.gen_rules ~sctx ~dir kind)
 ;;
 
-let gen_rules_regular_directory (sctx : Super_context.t Memo.t) ~src_dir ~components ~dir =
+let gen_rules_regular_directory
+      (sctx : Super_context.t Memo.t)
+      ~src_dir
+      ~components
+      ~dir
+      ~report_dune_file
+  =
   Dir_status.DB.get ~dir
   >>= function
   | Lock_dir _ -> Memo.return Gen_rules.no_rules
@@ -647,6 +653,10 @@ let gen_rules_regular_directory (sctx : Super_context.t Memo.t) ~src_dir ~compon
         | Generated | Is_component_of_a_group_but_not_the_root _ ->
           Memo.return Rules.empty |> make_rules |> Gen_rules.redirect_to_parent
         | Standalone (source_dir, _) | Group_root { source_dir; _ } ->
+          report_dune_file
+            (Path.Source.relative_fname
+               (Source_tree.Dir.path source_dir)
+               Source.Dune_file.fname);
           gen_rules_standalone_or_root sctx ~dir ~source_dir
           |> make_rules
           |> Gen_rules.rules_here
@@ -661,7 +671,7 @@ let gen_rules_regular_directory (sctx : Super_context.t Memo.t) ~src_dir ~compon
 
 (* Once [gen_rules] has decided what to do with the directory, it should end
    with [has_rules] or [redirect_to_parent] *)
-let gen_rules ctx sctx ~dir components : Gen_rules.result Memo.t =
+let gen_rules ctx sctx ~dir ~report_dune_file components : Gen_rules.result Memo.t =
   let src_dir = Path.Build.drop_build_context_exn dir in
   match components with
   | ".js" :: rest ->
@@ -712,7 +722,7 @@ let gen_rules ctx sctx ~dir components : Gen_rules.result Memo.t =
     Jsoo_archive_rules.lib_archive_rules_for_dir ~dir
     >>= (function
      | Jsoo_archive_rules.Not_found ->
-       gen_rules_regular_directory sctx ~src_dir ~components ~dir
+       gen_rules_regular_directory sctx ~src_dir ~components ~dir ~report_dune_file
      | Jsoo_archive_rules.Root -> Gen_rules.make_empty ~dir Subdir_set.all |> Memo.return
      | Jsoo_archive_rules.Rules rules -> Gen_rules.make (Memo.return rules) |> Memo.return)
 ;;
@@ -789,6 +799,8 @@ let raise_on_lock_dir_out_of_sync =
 ;;
 
 let gen_rules ctx ~dir components =
+  Graph_trace.Gen_rules.start ~dir
+  @@ fun report_dune_file ->
   if Context_name.equal ctx Install.Context.install_context.name
   then (
     match components with
@@ -845,7 +857,9 @@ let gen_rules ctx ~dir components =
   else
     let* () = raise_on_lock_dir_out_of_sync ctx in
     let gen_pkg_alias_rule = Pkg_rules.setup_pkg_install_alias ~dir ctx in
-    let+ sctx_rules = gen_rules ctx (Super_context.find_exn ctx) ~dir components in
+    let+ sctx_rules =
+      gen_rules ctx (Super_context.find_exn ctx) ~dir ~report_dune_file components
+    in
     Gen_rules.combine sctx_rules gen_pkg_alias_rule
 ;;
 

@@ -44,6 +44,7 @@ include struct
   module Dpath = Dpath
   module Alias = Alias
   module File_selector = File_selector
+  module Graph_trace = Graph_trace
   module Dep = Dep
   module Build_config = Build_config
   module Fs_memo = Fs_memo

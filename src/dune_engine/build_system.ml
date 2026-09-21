@@ -393,7 +393,10 @@ module Internal = struct
     Memo.exec (Lazy.force build_file_selector_memo) file_selector
 
   and build_file_selector_impl file_selector =
+    Graph_trace.Build_dep.file_selector file_selector
+    @@ fun trace_resolved ->
     let* files = eval_pred file_selector in
+    trace_resolved files;
     let+ fact = Dep.Fact.Files.create files ~build_file in
     (* Fact: [file_selector] expands to the set of [files] whose digests are captured
        via [build_file]; also, the [File_selector.dir] exists (though it may be empty) *)
@@ -574,6 +577,8 @@ module Internal = struct
       Target_promotion.promote ~targets ~promote ~promote_source
 
   and execute_rule_impl ~rule_kind rule =
+    Graph_trace.Exec_rule.start ~rule
+    @@ fun ~deps_resolved ~trace_action ~finish ->
     let { Rule.id = _; targets; mode; action; info } = rule in
     let* execution_parameters =
       match Dpath.Target_dir.of_target targets.root with
@@ -591,6 +596,7 @@ module Internal = struct
        memoized, and the result is not expected to change often, so we do not
        sacrifice too much performance here by executing it sequentially. *)
     let* action, facts = Action_builder.evaluate_and_collect_facts action in
+    deps_resolved facts;
     let { Action.Full.action = action_ast; props } = action in
     let wrap_fiber f =
       Memo.of_reproducible_fiber
@@ -655,7 +661,7 @@ module Internal = struct
           false
         | _ -> true
       in
-      let* (produced_targets : Digest.t Targets.Produced.t) =
+      let* (produced_targets : Digest.t Targets.Produced.t), outcome, dyn_deps =
         (* Step I. Check if the workspace-local cache is up to date. *)
         Rule_cache.Workspace_local.lookup
           ~always_rerun
@@ -664,7 +670,9 @@ module Internal = struct
           ~env:props.env
           ~build_deps
         >>= function
-        | Some produced_targets -> Fiber.return produced_targets
+        | Some produced_targets ->
+          let outcome = Graph_trace.Exec_rule.Local_cache_hit in
+          Fiber.return (produced_targets, outcome, [])
         | None ->
           Path.mkdir_p (Path.build targets.root);
           (* Step II. Remove stale targets both from the digest table and from
@@ -692,7 +700,7 @@ module Internal = struct
             in
             Targets.Validated.iter targets ~file:remove_target_file ~dir:remove_target_dir
           in
-          let* produced_targets, dynamic_deps_stages =
+          let* produced_targets, dynamic_deps_stages, outcome =
             (* Step III. Try to restore artifacts from the shared cache. *)
             Dune_cache.Shared.lookup ~can_go_in_shared_cache ~rule_digest ~targets
             >>= function
@@ -704,20 +712,22 @@ module Internal = struct
                  is precisely the reason why we don't store dynamic actions in
                  the shared cache. *)
               let dynamic_deps_stages = [] in
-              Fiber.return (produced_targets, dynamic_deps_stages)
+              let outcome = Graph_trace.Exec_rule.Shared_cache_hit in
+              Fiber.return (produced_targets, dynamic_deps_stages, outcome)
             | None ->
               (* Step IV. Execute the build action. *)
               let loc = Rule.loc rule in
               let* exec_result =
-                execute_action_for_rule
-                  ~rule_kind
-                  ~rule_digest
-                  ~action
-                  ~facts
-                  ~loc
-                  ~execution_parameters
-                  ~sandbox_mode
-                  ~targets
+                trace_action (fun () ->
+                  execute_action_for_rule
+                    ~rule_kind
+                    ~rule_digest
+                    ~action
+                    ~facts
+                    ~loc
+                    ~execution_parameters
+                    ~sandbox_mode
+                    ~targets)
               in
               (* Step V. Examine produced targets and store them to the shared
                  cache if needed. *)
@@ -737,7 +747,8 @@ module Internal = struct
                       Dep.Facts.digest fact_map d ~env:props.env;
                       Digest.Manual.get d ))
               in
-              Fiber.return (produced_targets, dynamic_deps_stages)
+              let outcome = Graph_trace.Exec_rule.Executed in
+              Fiber.return (produced_targets, dynamic_deps_stages, outcome)
           in
           (* We do not include target names into [targets_digest] because they
              are already included into the rule digest. *)
@@ -747,7 +758,7 @@ module Internal = struct
             ~rule_digest
             ~dynamic_deps_stages
             ~targets_digest:(Targets.Produced.digest produced_targets);
-          Fiber.return produced_targets
+          Fiber.return (produced_targets, outcome, List.map dynamic_deps_stages ~f:fst)
       in
       let+ () =
         promote_targets
@@ -755,6 +766,7 @@ module Internal = struct
           ~targets:produced_targets
           ~promote_source:config.promote_source
       in
+      finish ~dyn_deps outcome;
       produced_targets)
     (* jeremidimino: We need to include the dependencies discovered while
        running the action here. Otherwise, package dependencies are broken in
@@ -889,10 +901,15 @@ module Internal = struct
                Digest.Feed.string hasher (Path.Local.to_string path)))
         contents
     in
+    Graph_trace.Build_dep.file path
+    @@ fun trace_resolved ->
     Load_rules.get_rule_or_source path
     >>= function
-    | Source digest -> Memo.return (digest, File_target)
+    | Source digest ->
+      trace_resolved None;
+      Memo.return (digest, File_target)
     | Rule (path, rule) ->
+      trace_resolved (Some rule);
       let* { facts = _; targets } =
         Memo.push_stack_frame
           (fun () -> execute_rule rule)
@@ -953,6 +970,8 @@ module Internal = struct
     | Action x -> dep_on_anonymous_action x
 
   and build_alias_impl alias =
+    Graph_trace.Build_dep.alias alias
+    @@ fun trace_resolved ->
     let+ l =
       Load_rules.get_alias_definition alias
       >>= Memo.parallel_map ~f:(fun (loc, definition) ->
@@ -963,6 +982,7 @@ module Internal = struct
              >>| snd)
           ~human_readable_description:(fun () -> Alias.describe alias ~loc))
     in
+    trace_resolved l;
     Dep.Facts.group_paths_as_fact_files l
 
   and eval_pred_impl g =

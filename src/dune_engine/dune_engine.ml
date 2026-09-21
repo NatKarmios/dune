@@ -27,6 +27,7 @@ module Build_system_error = Build_system_error
 module Load_rules = Load_rules
 module Response_file = Response_file
 module File_selector = File_selector
+module Graph_trace = Graph_trace
 module Print_diff = Print_diff
 module Diff_promotion = Diff_promotion
 module Fs_memo = Fs_memo
