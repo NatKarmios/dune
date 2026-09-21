@@ -31,6 +31,11 @@ module Glob : sig
 
   val repr : t Repr.t
   val to_dyn : t -> Dyn.t
+
+  (** Render in the predicate language's own syntax, so that the string reads
+      back the way it was written in the dune file. *)
+  val to_string : t -> string
+
   val test : t -> standard:t -> string -> bool
   val of_glob : Dune_rpc.Private.Glob.t -> t
 

@@ -275,16 +275,16 @@ interned ids of the paths:
   > '
   ["_build/default/bar.src","_build/default/foo.src"]
 
-The glob's own rendering is not pinned here: it is the only dep kind whose
-string form is still a debug rendering of the predicate. Its resolution is
-what matters, so we pick it out as the resolution of the single build-dep
-span whose dep string is neither a path nor an alias:
+A glob dep is rendered as its directory followed by the predicate in the
+predicate language's own syntax, so the string reads back the way the glob
+was written in the dune file. Selecting the span by that exact string is
+what pins the rendering:
 
   $ dune trace cat | jq -sc '
   >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
   >     ({}; .[$e.id | tostring] = $e.value)) as $names
   >   | ([ .[] | select(.name == "build-dep" and .async_phase == "begin")
-  >        | select($names[.args.dep | tostring] | test("[*]"))
+  >        | select($names[.args.dep | tostring] == "_build/default/*.src")
   >        | .async_id ][0]) as $span
   >   | [ .[] | select(.name == "build-dep" and .async_phase == "end"
   >                    and .async_id == $span)
@@ -335,3 +335,38 @@ action runs, so there are no exec-rule-action events at all:
   true
   $ dune trace cat | jq -sr '[ .[] | select(.name == "exec-rule-action") ] | length'
   0
+
+Not every build is forced by a rule or a dep. Three scopes name work that
+the engine cannot attribute on its own: the top-level request for a goal,
+the forcing of the configurator files, and a pform expanded at
+rule-generation time, which builds whatever it reads without recording a
+dependency on it. The last is named after the dune file the pform was
+written in.
+
+  $ mkdir p q
+  $ cat >p/dune <<EOF
+  > (rule
+  >  (target name.txt)
+  >  (action (with-stdout-to name.txt (echo "made"))))
+  > EOF
+  $ cat >q/dune <<EOF
+  > (rule
+  >  (targets %{read:../p/name.txt})
+  >  (action (with-stdout-to %{read:../p/name.txt} (echo "hi"))))
+  > EOF
+
+  $ rm -rf _build
+  $ DUNE_TRACE=+graph dune build q/made
+
+  $ dune trace cat | jq -sc '
+  >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
+  >     ({}; .[$e.id | tostring] = $e.value)) as $names
+  >   | [ .[] | select(.name == "build-dep" and .async_phase == "begin")
+  >       | { dep: $names[.args.dep | tostring]
+  >         , by: [ .args.forced_by[0], $names[.args.forced_by[1] | tostring] ] } ]
+  >   | sort_by(.dep) | .[]
+  > '
+  {"dep":"_build/default/.dune/configurator","by":["configurator",null]}
+  {"dep":"_build/default/.dune/configurator.v2","by":["configurator",null]}
+  {"dep":"_build/default/p/name.txt","by":["pform","q/dune"]}
+  {"dep":"_build/default/q/made","by":["request",null]}

@@ -17,12 +17,10 @@ let dep_to_string (dep : Dep.t) =
       (Path.Build.to_string (Alias.dir a))
       (Alias.Name.to_string (Alias.name a))
   | File_selector fs ->
-    (* CR-someday nkarmios: render the predicate as a glob expression once
-       [Predicate_lang.Glob.to_string] exists. *)
     sprintf
       "%s/%s"
       (path_to_string (File_selector.dir fs))
-      (Dyn.to_string (Predicate_lang.Glob.to_dyn (File_selector.predicate fs)))
+      (Predicate_lang.Glob.to_string (File_selector.predicate fs))
   | Universe -> "universe"
 ;;
 
@@ -35,6 +33,9 @@ module Forced_by = struct
   let dep ~dep = Forced_by_dep (dep_to_string dep)
   let dynamic_includes ~dune_file = Forced_by_dynamic_includes dune_file
   let gen_rules ~dir = Forced_by_gen_rules dir
+  let pform ~dune_file = Forced_by_pform dune_file
+  let configurator = Forced_by_configurator
+  let request = Forced_by_request
 end
 
 module Build_dep = struct
@@ -212,5 +213,40 @@ module Gen_rules = struct
        result)
       |> Memo.of_reproducible_fiber)
     else f ignore
+  ;;
+end
+
+module Pform = struct
+  (* No span event: pform expansions are far too numerous for one span
+     each. *)
+  let expand ~(dir : Path.Build.t) ~(fname : Filename.t) (f : unit -> 'a Memo.t)
+    : 'a Memo.t
+    =
+    if enabled Category.Graph
+    then (
+      match Path.Build.drop_build_context dir with
+      | None -> f ()
+      | Some src_dir ->
+        let dune_file = Path.Source.relative_fname src_dir fname in
+        Forced_by.set ~new_forcer:(Forced_by.pform ~dune_file) f ()
+        |> Memo.of_reproducible_fiber)
+    else f ()
+  ;;
+end
+
+module Configurator = struct
+  let force (f : unit -> 'a Memo.t) : 'a Memo.t =
+    if enabled Category.Graph
+    then
+      Forced_by.set ~new_forcer:Forced_by.configurator f () |> Memo.of_reproducible_fiber
+    else f ()
+  ;;
+end
+
+module Request = struct
+  let build (f : unit -> 'a Memo.t) : 'a Memo.t =
+    if enabled Category.Graph
+    then Forced_by.set ~new_forcer:Forced_by.request f () |> Memo.of_reproducible_fiber
+    else f ()
   ;;
 end

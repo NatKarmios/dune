@@ -232,13 +232,12 @@ module Glob = struct
       | Glob g -> Dyn.variant "Glob" [ Glob.to_dyn (unproxy g) ]
     ;;
 
-    let encode t =
-      Dune_sexp.atom_or_quoted_string
-      @@
-      match t with
+    let to_string = function
       | Literal s -> s
       | Glob g -> Glob.to_string (unproxy g)
     ;;
+
+    let encode t = Dune_sexp.atom_or_quoted_string (to_string t)
 
     let compare x y =
       match x, y with
@@ -276,6 +275,22 @@ module Glob = struct
   let repr = repr Element.repr
   let to_dyn t = to_dyn Element.to_dyn t
   let test (t : t) ~standard elem = test t ~standard ~test:Element.test elem
+
+  let rec to_string (t : t) =
+    match t with
+    | Element e -> Element.to_string e
+    | True -> "*"
+    | False -> "(and)"
+    | Standard -> ":standard"
+    | Not t -> sprintf "(not %s)" (to_string t)
+    | Or ts -> parens "or" ts
+    | And ts -> parens "and" ts
+
+  and parens name ts =
+    List.map ts ~f:(fun t -> " " ^ to_string t)
+    |> String.concat ~sep:""
+    |> sprintf "(%s%s)" name
+  ;;
 
   let of_glob g =
     let proxy =

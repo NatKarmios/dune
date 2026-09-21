@@ -1068,6 +1068,8 @@ module No_deps = struct
   let expand_pform_no_deps t ~source pform =
     Memo.push_stack_frame
       (fun () ->
+         Graph_trace.Pform.expand ~dir:t.dir ~fname:Source.Dune_file.fname
+         @@ fun () ->
          match expand_pform_gen t ~source pform with
          | With _ -> isn't_allowed_in_this_position ~source
          | Without x -> x)

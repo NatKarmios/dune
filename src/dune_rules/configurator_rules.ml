@@ -51,6 +51,8 @@ let gen_rules (ctx : Build_context.t) (ocaml : Ocaml_toolchain.t Action_builder.
 
 let force_files =
   Memo.lazy_ ~name:"force-configuration-files" (fun () ->
+    Graph_trace.Configurator.force
+    @@ fun () ->
     let* ctxs = Context.DB.all () in
     let files =
       List.concat_map ctxs ~f:(fun t ->
