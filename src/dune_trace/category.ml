@@ -26,6 +26,7 @@ type t =
   | Thread
   | Runtime
   | Sat
+  | Graph
 
 let all =
   [ Rpc
@@ -53,6 +54,7 @@ let all =
   ; Thread
   ; Runtime
   ; Sat
+  ; Graph
   ]
 ;;
 
@@ -82,6 +84,7 @@ let to_string = function
   | Thread -> "thread"
   | Runtime -> "runtime"
   | Sat -> "sat"
+  | Graph -> "graph"
 ;;
 
 let of_string =
@@ -123,6 +126,7 @@ module Set = Bit_set.Make (struct
       | Thread -> 22
       | Runtime -> 23
       | Sat -> 24
+      | Graph -> 25
     ;;
   end)
 

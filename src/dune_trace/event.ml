@@ -143,6 +143,105 @@ end
 
 type t = Event.t
 
+(* To reduce trace size, strings in Graph events are interned via an instant
+   event before use. *)
+module Intern = struct
+  type t =
+    { ids : int String.Table.t
+    ; mutable next : int
+    }
+
+  let tbl = { ids = String.Table.create 1024; next = 0 }
+
+  let get key =
+    match String.Table.find tbl.ids key with
+    | Some id -> id, `Existing
+    | None ->
+      let id = tbl.next in
+      tbl.next <- id + 1;
+      String.Table.set tbl.ids key id;
+      id, `New
+  ;;
+
+  let mk_event ~ts entries =
+    let entries =
+      List.map entries ~f:(fun (id, value) ->
+        Arg.record [ "id", Arg.int id; "value", Arg.string value ] |> Arg.list)
+    in
+    Event.instant ~args:[ "entries", Arg.list entries ] ~name:"intern" ts Graph
+  ;;
+
+  let strings ~ts strings =
+    let new_entries = ref [] in
+    let ids =
+      List.map strings ~f:(fun s ->
+        let id, freshness = get s in
+        (match freshness with
+         | `New -> new_entries := (id, s) :: !new_entries
+         | `Existing -> ());
+        id)
+    in
+    let intern_events =
+      match List.rev !new_entries with
+      | [] -> []
+      | entries -> [ mk_event ~ts entries ]
+    in
+    intern_events, ids
+  ;;
+
+  let string ~ts s =
+    let id, freshness = get s in
+    let events =
+      match freshness with
+      | `New -> [ mk_event ~ts [ id, s ] ]
+      | `Existing -> []
+    in
+    events, id
+  ;;
+end
+
+module Forced_by = struct
+  type t =
+    | Forced_by_rule of int
+    | Forced_by_dep of string
+    | Forced_by_dynamic_includes of Path.Source.t
+    | Forced_by_gen_rules of Path.Build.t
+    | Forced_by_pform of Path.Source.t
+    | Forced_by_configurator
+    | Forced_by_request
+
+  (* The tag identifying the kind of forcer, and the strings it carries, kept
+     apart so that the strings can be interned before rendering. *)
+  let split = function
+    | Forced_by_rule id -> `Rule id, []
+    | Forced_by_dep dep -> `Paths "dep", [ dep ]
+    | Forced_by_dynamic_includes path ->
+      `Paths "dynamic-includes", [ Path.Source.to_string path ]
+    | Forced_by_gen_rules dir -> `Paths "gen-rules", [ Path.Build.to_string dir ]
+    | Forced_by_pform dune_file -> `Paths "pform", [ Path.Source.to_string dune_file ]
+    | Forced_by_configurator -> `Paths "configurator", []
+    | Forced_by_request -> `Paths "request", []
+  ;;
+
+  (* [items] renders the strings of a [`Paths] forcer; the other tag carries
+     none. *)
+  let parts tag items =
+    match tag with
+    | `Rule id -> [ Arg.string "rule"; Arg.int id ]
+    | `Paths name -> Arg.string name :: items
+  ;;
+
+  (* Strings go through the intern table, and the key is emitted even with no
+     forcer. *)
+  let args ~ts = function
+    | None -> [], [ "forced_by", Arg.list [] ]
+    | Some forced_by ->
+      let tag, strings = split forced_by in
+      let intern_events, ids = Intern.strings ~ts strings in
+      intern_events, [ "forced_by", Arg.list (parts tag (List.map ids ~f:Arg.int)) ]
+  ;;
+end
+
 type alloc_config =
   { sampling_rate : float
   ; callstack_size : int
@@ -1146,3 +1245,188 @@ let runtime_counter ring_id time name value =
   in
   Event.instant ~args ~name:"counter" time Runtime
 ;;
+
+module Graph = struct
+  let ids_arg key ids =
+    match ids with
+    | [] -> []
+    | _ :: _ -> [ key, Arg.list (List.map ids ~f:Arg.int) ]
+  ;;
+
+  module Build_dep = struct
+    module Resolution = struct
+      type t =
+        | Rule of int
+        | Expanded of string list
+        | Source
+        | Unknown
+
+      let arg_interned ~ts = function
+        | Rule rule_id -> Arg.list [ Arg.string "rule"; Arg.int rule_id ], []
+        | Expanded expanded ->
+          let intern_events, expanded_ids = Intern.strings ~ts expanded in
+          let arg =
+            Arg.list (Arg.string "expanded" :: List.map expanded_ids ~f:Arg.int)
+          in
+          arg, intern_events
+        | Source -> Arg.list [ Arg.string "is-source" ], []
+        | Unknown -> Arg.list [ Arg.string "unknown" ], []
+      ;;
+    end
+
+    let start ~async_id ~forced_by ~dep =
+      let ts = Time.now () in
+      let intern_events, dep_id = Intern.string ~ts dep in
+      let dep_arg = [ "dep", Arg.int dep_id ] in
+      let forced_by_intern_events, forced_by_args = Forced_by.args ~ts forced_by in
+      let args = dep_arg @ forced_by_args in
+      intern_events
+      @ forced_by_intern_events
+      @ [ Event.async_begin ~args ~async_id ~name:"build-dep" ts Graph ]
+    ;;
+
+    let finish ~async_id ~resolution =
+      let ts = Time.now () in
+      let resolution_arg, intern_events = Resolution.arg_interned ~ts resolution in
+      let args = [ "dep_resolution", resolution_arg ] in
+      intern_events @ [ Event.async_end ~args ~async_id ~name:"build-dep" ts Graph ]
+    ;;
+  end
+
+  module Exec_rule = struct
+    module Outcome = struct
+      type t =
+        | Executed
+        | Local_cache_hit
+        | Shared_cache_hit
+
+      let to_string = function
+        | Executed -> "executed"
+        | Local_cache_hit -> "local-cache-hit"
+        | Shared_cache_hit -> "shared-cache-hit"
+      ;;
+    end
+
+    module Deps = struct
+      type t =
+        { static : string list
+        ; dynamic : string list list
+        }
+
+      let args_interned ~ts { static; dynamic } =
+        let static_intern_events, static_ids = Intern.strings ~ts static in
+        let static_arg = ids_arg "deps" static_ids in
+        let dyn_intern_events, dyn_ids =
+          dynamic |> List.map ~f:(Intern.strings ~ts) |> List.split
+        in
+        let dyn_intern_events = List.concat dyn_intern_events in
+        let dyn_arg =
+          match dyn_ids with
+          | [] -> []
+          | _ :: _ ->
+            [ ( "dyn_deps"
+              , Arg.list
+                  (List.map dyn_ids ~f:(fun ids -> Arg.list (List.map ids ~f:Arg.int))) )
+            ]
+        in
+        static_arg @ dyn_arg, static_intern_events @ dyn_intern_events
+      ;;
+    end
+
+    let start ~async_id ~rule_id ~dir ~target_files ~target_dirs ~forced_by ~start =
+      let dir_intern_events, dir_id = Intern.string ~ts:start dir in
+      let file_intern_events, file_ids = Intern.strings ~ts:start target_files in
+      let dir_target_intern_events, dir_target_ids =
+        Intern.strings ~ts:start target_dirs
+      in
+      let forced_by_intern_events, forced_by_args = Forced_by.args ~ts:start forced_by in
+      let args =
+        (("rule_id", Arg.int rule_id) :: forced_by_args)
+        @ [ "dir", Arg.int dir_id ]
+        @ ids_arg "target_files" file_ids
+        @ ids_arg "target_dirs" dir_target_ids
+      in
+      dir_intern_events
+      @ file_intern_events
+      @ dir_target_intern_events
+      @ forced_by_intern_events
+      @ [ Event.async_begin ~args ~async_id ~name:"exec-rule" start Graph ]
+    ;;
+
+    let finish ~async_id ~rule_id ~deps ~outcome =
+      let ts = Time.now () in
+      let dep_args, dep_intern_events = Deps.args_interned ~ts deps in
+      let args =
+        [ "rule_id", Arg.int rule_id
+        ; "rule_outcome", Arg.string (Outcome.to_string outcome)
+        ]
+        @ dep_args
+      in
+      dep_intern_events @ [ Event.async_end ~args ~async_id ~name:"exec-rule" ts Graph ]
+    ;;
+  end
+
+  module Exec_rule_action = struct
+    let start ~async_id ~rule_id ~start =
+      Event.async_begin
+        ~args:[ "rule_id", Arg.int rule_id ]
+        ~async_id
+        ~name:"exec-rule-action"
+        start
+        Graph
+    ;;
+
+    let finish ~async_id =
+      Event.async_end ~async_id ~name:"exec-rule-action" (Time.now ()) Graph
+    ;;
+  end
+
+  (* The path identifying a [gen-rules] or [dynamic-includes] span is on both
+     its begin and its end event, so that either one on its own says which
+     span it belongs to. *)
+  let dune_file_arg ~ts dune_file =
+    let intern_events, id = Intern.string ~ts (Path.Source.to_string dune_file) in
+    intern_events, [ "dune_file", Arg.int id ]
+  ;;
+
+  module Dynamic_includes = struct
+    let start ~async_id ~dune_file ~start =
+      let intern_events, args = dune_file_arg ~ts:start dune_file in
+      intern_events
+      @ [ Event.async_begin ~args ~async_id ~name:"dynamic-includes" start Graph ]
+    ;;
+
+    let finish ~async_id ~dune_file =
+      let ts = Time.now () in
+      let intern_events, args = dune_file_arg ~ts dune_file in
+      intern_events
+      @ [ Event.async_end ~args ~async_id ~name:"dynamic-includes" ts Graph ]
+    ;;
+  end
+
+  module Gen_rules = struct
+    let dir_arg ~ts dir =
+      let intern_events, id = Intern.string ~ts (Path.Build.to_string dir) in
+      intern_events, [ "dir", Arg.int id ]
+    ;;
+
+    let start ~async_id ~dir ~start =
+      let intern_events, args = dir_arg ~ts:start dir in
+      intern_events @ [ Event.async_begin ~args ~async_id ~name:"gen-rules" start Graph ]
+    ;;
+
+    let finish ~async_id ~dir ~dune_file =
+      let ts = Time.now () in
+      let dir_intern_events, dir_args = dir_arg ~ts dir in
+      let dune_file_intern_events, dune_file_args =
+        match dune_file with
+        | None -> [], []
+        | Some dune_file -> dune_file_arg ~ts dune_file
+      in
+      let args = dir_args @ dune_file_args in
+      dir_intern_events
+      @ dune_file_intern_events
+      @ [ Event.async_end ~args ~async_id ~name:"gen-rules" ts Graph ]
+    ;;
+  end
+end

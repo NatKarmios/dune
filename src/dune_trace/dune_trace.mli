@@ -27,6 +27,7 @@ module Category : sig
     | Thread
     | Runtime
     | Sat
+    | Graph
 end
 
 module Event : sig
@@ -46,6 +47,18 @@ module Event : sig
   end
 
   type t
+
+  (** What forced the build a span belongs to. *)
+  module Forced_by : sig
+    type t =
+      | Forced_by_rule of int
+      | Forced_by_dep of string
+      | Forced_by_dynamic_includes of Path.Source.t
+      | Forced_by_gen_rules of Path.Build.t
+      | Forced_by_pform of Path.Source.t
+      | Forced_by_configurator
+      | Forced_by_request
+  end
 
   val sandbox
     :  [ `Create | `Snapshot | `Destroy | `Extract | `Corrected ]
@@ -317,6 +330,83 @@ module Event : sig
 
   val debug : (string * Dyn.t) list -> t
   val artifact_substitution : file:Path.t -> placeholder:Dyn.t -> value:string -> t
+
+  (** Events describing the build graph dune walks. Strings are interned: the
+      first time one is seen an "intern" instant event records its id ->
+      value mapping, and the events refer to it by id thereafter. That is why
+      these constructors return a list -- the intern events come first. *)
+  module Graph : sig
+    module Build_dep : sig
+      module Resolution : sig
+        type t =
+          | Rule of int
+          | Expanded of string list
+          | Source
+          | Unknown
+      end
+
+      val start
+        :  async_id:Async.id
+        -> forced_by:Forced_by.t option
+        -> dep:string
+        -> t list
+
+      val finish : async_id:Async.id -> resolution:Resolution.t -> t list
+    end
+
+    module Exec_rule : sig
+      module Outcome : sig
+        type t =
+          | Executed
+          | Local_cache_hit
+          | Shared_cache_hit
+      end
+
+      module Deps : sig
+        type t =
+          { static : string list
+          ; dynamic : string list list (** One entry per dynamic-deps stage. *)
+          }
+      end
+
+      val start
+        :  async_id:Async.id
+        -> rule_id:int
+        -> dir:string
+        -> target_files:string list
+        -> target_dirs:string list
+        -> forced_by:Forced_by.t option
+        -> start:Time.t
+        -> t list
+
+      val finish
+        :  async_id:Async.id
+        -> rule_id:int
+        -> deps:Deps.t
+        -> outcome:Outcome.t
+        -> t list
+    end
+
+    module Exec_rule_action : sig
+      val start : async_id:Async.id -> rule_id:int -> start:Time.t -> t
+      val finish : async_id:Async.id -> t
+    end
+
+    module Dynamic_includes : sig
+      val start : async_id:Async.id -> dune_file:Path.Source.t -> start:Time.t -> t list
+      val finish : async_id:Async.id -> dune_file:Path.Source.t -> t list
+    end
+
+    module Gen_rules : sig
+      val start : async_id:Async.id -> dir:Path.Build.t -> start:Time.t -> t list
+
+      val finish
+        :  async_id:Async.id
+        -> dir:Path.Build.t
+        -> dune_file:Path.Source.t option
+        -> t list
+    end
+  end
 end
 
 module File_watcher_event : sig
