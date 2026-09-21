@@ -193,10 +193,14 @@ replace timing values that vary between runs:
 format: each event with a duration becomes a slice on dune's main thread
 track, each spawned process a slice on a pool of ``job-NNN`` tracks, and
 everything else an instant. ``--text`` emits a human-readable dump of the
-same packets, which is what cram tests assert on.
+same packets, which is what cram tests assert on. Enabling the ``graph``
+trace category additionally records the build graph -- which rules ran, what
+forced them, and what each depended on -- as lifecycle instants plus a
+chunked blob of the graph structure; see ``doc/dev/trace-graph-perfetto.md``.
 
 .. code:: console
 
+   $ DUNE_TRACE=+graph dune build
    $ dune trace perfetto -o trace.pb
 
 .. seealso:: :doc:`advanced/profiling-dune` for loading traces into chrome://tracing
