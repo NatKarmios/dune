@@ -28,14 +28,17 @@ exception Build_cancelled
 
 let cancelled () = raise (Memo.Non_reproducible Build_cancelled)
 
+(* [Build_cancelled] is raised wrapped in [Memo.Non_reproducible] (see
+   [cancelled] above), and a memo node it passes through wraps it again in
+   [Memo.Error.E], so a handler may see it under either or both. *)
 let caused_by_cancellation (exn : Exn_with_backtrace.t) =
-  match exn.exn with
-  | Build_cancelled -> true
-  | Memo.Error.E err ->
-    (match Memo.Error.get err with
-     | Build_cancelled -> true
-     | _ -> false)
-  | _ -> false
+  let rec loop = function
+    | Build_cancelled -> true
+    | Memo.Non_reproducible exn -> loop exn
+    | Memo.Error.E err -> loop (Memo.Error.get err)
+    | _ -> false
+  in
+  loop exn.exn
 ;;
 
 let check_cancelled = function

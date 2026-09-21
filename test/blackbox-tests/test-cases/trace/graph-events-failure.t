@@ -73,12 +73,12 @@ caused the failure.
   > '
   [["_build/default/dep.txt"]]
 
-A rule that is still running when the build is torn down around it should
-report "cancelled" and no deps: the build is going away, so dune should spend
-no work recovering them. To get there without a race, the rule that fails waits
-for the rule that will be cancelled to signal that it has started -- so the
-cancelled rule's action is certainly running, and its span certainly open,
-before the other one fails.
+A rule that is still running when the build is torn down around it reports
+"cancelled" and no deps: the build is going away, so dune spends no work
+recovering them. To get there without a race, the rule that fails waits for the
+rule that will be cancelled to signal that it has started -- so the cancelled
+rule's action is certainly running, and its span certainly open, before the
+other one fails.
 
 This part of the test relies on the scheduler killing that running action:
 --stop-on-first-error fires the cancellation, and the sleep below only ends
@@ -114,10 +114,9 @@ here, rather than hanging until the cram timeout:
   >   --stop-on-first-error -j2 2>/dev/null
   [1]
 
-slow.txt is the cancelled rule, and it is misreported as "action-fail" -- the
-cancellation reaches this span as the scheduler raises it, wrapped in
-Memo.Non_reproducible, which Scheduler.Run.caused_by_cancellation does not look
-through:
+slow.txt is the cancelled rule. The cancellation reaches this span as the
+scheduler raises it, wrapped in Memo.Non_reproducible, which
+Scheduler.Run.caused_by_cancellation looks through:
 
   $ dune trace cat | jq -sr '
   >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
@@ -133,14 +132,13 @@ through:
   >   | sort[]
   > '
   _build/default/fails.txt action-fail deps=0
-  _build/default/slow.txt action-fail deps=0
+  _build/default/slow.txt cancelled deps=0
 
 The alias over the cancelled rule is the one case where no resolution can be
 produced: an alias's expansion is not known up front, and a cancellation
 deliberately skips recovering it. That is reported as "unknown", which a
 consumer can tell apart from a span that simply never ended. This span sees the
-cancellation after a memo node has wrapped it in Memo.Error.E, which the
-predicate does look through, so it is already right:
+cancellation after a memo node has wrapped it in Memo.Error.E as well:
 
   $ dune trace cat | jq -sr '
   >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
