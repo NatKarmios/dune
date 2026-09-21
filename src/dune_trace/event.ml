@@ -203,6 +203,7 @@ end
 module Forced_by = struct
   type t =
     | Forced_by_rule of int
+    | Forced_by_dep_recovery of int
     | Forced_by_dep of string
     | Forced_by_dynamic_includes of Path.Source.t
     | Forced_by_gen_rules of Path.Build.t
@@ -214,6 +215,7 @@ module Forced_by = struct
      apart so that the strings can be interned before rendering. *)
   let split = function
     | Forced_by_rule id -> `Rule id, []
+    | Forced_by_dep_recovery id -> `Dep_recovery id, []
     | Forced_by_dep dep -> `Paths "dep", [ dep ]
     | Forced_by_dynamic_includes path ->
       `Paths "dynamic-includes", [ Path.Source.to_string path ]
@@ -223,11 +225,12 @@ module Forced_by = struct
     | Forced_by_request -> `Paths "request", []
   ;;
 
-  (* [items] renders the strings of a [`Paths] forcer; the other tag carries
+  (* [items] renders the strings of a [`Paths] forcer; the other tags carry
      none. *)
   let parts tag items =
     match tag with
     | `Rule id -> [ Arg.string "rule"; Arg.int id ]
+    | `Dep_recovery id -> [ Arg.string "dep-recovery"; Arg.int id ]
     | `Paths name -> Arg.string name :: items
   ;;
 
@@ -1286,6 +1289,27 @@ module Graph = struct
       ;;
     end
 
+    module Status = struct
+      type t =
+        | Succeeded
+        | Failed
+        | Cancelled
+
+      let to_string = function
+        | Succeeded -> "succeeded"
+        | Failed -> "failed"
+        | Cancelled -> "cancelled"
+      ;;
+
+      (* [Succeeded] is the common case, left off the event entirely: a
+         consumer reads a missing key as success. *)
+      let arg = function
+        | Succeeded -> []
+        | (Failed | Cancelled) as status ->
+          [ "dep_status", Arg.string (to_string status) ]
+      ;;
+    end
+
     let start ~async_id ~forced_by ~dep =
       let ts = Time.now () in
       let intern_events, dep_id = Intern.string ~ts dep in
@@ -1297,10 +1321,10 @@ module Graph = struct
       @ [ Event.async_begin ~args ~async_id ~name:"build-dep" ts Graph ]
     ;;
 
-    let finish ~async_id ~resolution =
+    let finish ~async_id ~resolution ~status =
       let ts = Time.now () in
       let resolution_arg, intern_events = Resolution.arg_interned ~ts resolution in
-      let args = [ "dep_resolution", resolution_arg ] in
+      let args = ("dep_resolution", resolution_arg) :: Status.arg status in
       intern_events @ [ Event.async_end ~args ~async_id ~name:"build-dep" ts Graph ]
     ;;
   end
@@ -1311,37 +1335,50 @@ module Graph = struct
         | Executed
         | Local_cache_hit
         | Shared_cache_hit
+        | Dep_fail
+        | Action_fail
+        | Cancelled
 
       let to_string = function
         | Executed -> "executed"
         | Local_cache_hit -> "local-cache-hit"
         | Shared_cache_hit -> "shared-cache-hit"
+        | Dep_fail -> "dep-fail"
+        | Action_fail -> "action-fail"
+        | Cancelled -> "cancelled"
       ;;
     end
 
     module Deps = struct
       type t =
-        { static : string list
-        ; dynamic : string list list
-        }
+        | Unknown
+        | Known of
+            { static : string list
+            ; dynamic : string list list
+            }
 
-      let args_interned ~ts { static; dynamic } =
-        let static_intern_events, static_ids = Intern.strings ~ts static in
-        let static_arg = ids_arg "deps" static_ids in
-        let dyn_intern_events, dyn_ids =
-          dynamic |> List.map ~f:(Intern.strings ~ts) |> List.split
-        in
-        let dyn_intern_events = List.concat dyn_intern_events in
-        let dyn_arg =
-          match dyn_ids with
-          | [] -> []
-          | _ :: _ ->
-            [ ( "dyn_deps"
-              , Arg.list
-                  (List.map dyn_ids ~f:(fun ids -> Arg.list (List.map ids ~f:Arg.int))) )
-            ]
-        in
-        static_arg @ dyn_arg, static_intern_events @ dyn_intern_events
+      (* [deps] is empty both for a rule with no deps and for one whose deps
+         dune could not determine, so [Unknown] says so explicitly. *)
+      let args_interned ~ts = function
+        | Unknown -> [ "deps_unknown", Arg.bool true ], []
+        | Known { static; dynamic } ->
+          let static_intern_events, static_ids = Intern.strings ~ts static in
+          let static_arg = ids_arg "deps" static_ids in
+          let dyn_intern_events, dyn_ids =
+            dynamic |> List.map ~f:(Intern.strings ~ts) |> List.split
+          in
+          let dyn_intern_events = List.concat dyn_intern_events in
+          let dyn_arg =
+            match dyn_ids with
+            | [] -> []
+            | _ :: _ ->
+              [ ( "dyn_deps"
+                , Arg.list
+                    (List.map dyn_ids ~f:(fun ids -> Arg.list (List.map ids ~f:Arg.int)))
+                )
+              ]
+          in
+          static_arg @ dyn_arg, static_intern_events @ dyn_intern_events
       ;;
     end
 

@@ -48,10 +48,14 @@ module Event : sig
 
   type t
 
-  (** What forced the build a span belongs to. *)
+  (** What forced the build a span belongs to. A dep recovered on behalf of a
+      rule that failed before resolving its deps carries
+      [Forced_by_dep_recovery] rather than [Forced_by_rule], so that it is
+      clear it was forced after the rule had already failed. *)
   module Forced_by : sig
     type t =
       | Forced_by_rule of int
+      | Forced_by_dep_recovery of int
       | Forced_by_dep of string
       | Forced_by_dynamic_includes of Path.Source.t
       | Forced_by_gen_rules of Path.Build.t
@@ -338,6 +342,9 @@ module Event : sig
       these constructors return a list -- the intern events come first. *)
   module Graph : sig
     module Build_dep : sig
+      (** What building a dep resolved it to: the rule producing it, the
+          concrete deps it expanded to (an alias or a glob), or a source file.
+          [Unknown] records a resolution dune could not determine. *)
       module Resolution : sig
         type t =
           | Rule of int
@@ -346,28 +353,54 @@ module Event : sig
           | Unknown
       end
 
+      (** How building the dep itself ended. Orthogonal to {!Resolution}: a
+          dep resolves before the building that may fail, so both are
+          reported independently. [Succeeded] is left off the event. *)
+      module Status : sig
+        type t =
+          | Succeeded
+          | Failed
+          | Cancelled
+      end
+
       val start
         :  async_id:Async.id
         -> forced_by:Forced_by.t option
         -> dep:string
         -> t list
 
-      val finish : async_id:Async.id -> resolution:Resolution.t -> t list
+      val finish
+        :  async_id:Async.id
+        -> resolution:Resolution.t
+        -> status:Status.t
+        -> t list
     end
 
     module Exec_rule : sig
+      (** How a rule's execution ended. The first three are successes; the
+          rest record a rule that never completed. [Dep_fail] is a failure
+          raised before the rule's deps were resolved and [Action_fail] one
+          raised after, while [Cancelled] means the build was torn down
+          around the rule, so it is not the rule's own failure. *)
       module Outcome : sig
         type t =
           | Executed
           | Local_cache_hit
           | Shared_cache_hit
+          | Dep_fail
+          | Action_fail
+          | Cancelled
       end
 
+      (** [Unknown] is a rule whose deps dune could not determine, as opposed
+          to [Known] with an empty [static], which is a rule that has none. *)
       module Deps : sig
         type t =
-          { static : string list
-          ; dynamic : string list list (** One entry per dynamic-deps stage. *)
-          }
+          | Unknown
+          | Known of
+              { static : string list
+              ; dynamic : string list list (** One entry per dynamic-deps stage. *)
+              }
       end
 
       val start

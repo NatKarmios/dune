@@ -970,7 +970,14 @@ module Internal = struct
     | Action x -> dep_on_anonymous_action x
 
   and build_alias_impl alias =
-    Graph_trace.Build_dep.alias alias
+    Graph_trace.Build_dep.alias alias ~recover:(fun () ->
+      (* The same walk as below, but collecting deps rather than facts, so it
+         reaches the alias's expansion without building it. *)
+      Load_rules.get_alias_definition alias
+      >>= Memo.parallel_map ~f:(fun (_loc, definition) ->
+        Action_builder.evaluate_and_collect_deps (dep_on_alias_definition definition)
+        >>| snd)
+      >>| Dep.Set.union_all)
     @@ fun trace_resolved ->
     let+ l =
       Load_rules.get_alias_definition alias
