@@ -28,6 +28,16 @@ exception Build_cancelled
 
 let cancelled () = raise (Memo.Non_reproducible Build_cancelled)
 
+let caused_by_cancellation (exn : Exn_with_backtrace.t) =
+  match exn.exn with
+  | Build_cancelled -> true
+  | Memo.Error.E err ->
+    (match Memo.Error.get err with
+     | Build_cancelled -> true
+     | _ -> false)
+  | _ -> false
+;;
+
 let check_cancelled = function
   | Some cancel when Fiber.Cancel.fired cancel -> cancelled ()
   | None | Some _ -> ()
@@ -536,6 +546,8 @@ let flush_file_watcher () =
 
 module Run = struct
   exception Build_cancelled = Build_cancelled
+
+  let caused_by_cancellation = caused_by_cancellation
 
   module Shutdown = Shutdown
 

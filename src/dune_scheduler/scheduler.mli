@@ -19,6 +19,11 @@ module Run : sig
 
   exception Build_cancelled
 
+  (** Whether [exn] was raised because the build was torn down, rather than by
+      a fault of its own. Looks through the [Memo.Error.E] wrapper it acquires
+      on the way out of a memo node. *)
+  val caused_by_cancellation : Exn_with_backtrace.t -> bool
+
   val go
     :  Config.t
     -> ?timeout:Time.Span.t
