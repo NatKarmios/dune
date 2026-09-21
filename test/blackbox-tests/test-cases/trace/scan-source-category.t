@@ -21,9 +21,7 @@ With the "rules" category enabled (the default), the event is recorded:
   $ scan_events with-rules.csexp
   rules Alias builder
 
-With the category disabled, it must not be. It still is, because the
-emitter bypasses the category filter:
+With the category disabled, it must not be:
 
   $ DUNE_TRACE=-rules dune build @foo --trace-file without-rules.csexp
   $ scan_events without-rules.csexp
-  rules Alias builder
