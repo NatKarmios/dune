@@ -189,6 +189,16 @@ replace timing values that vary between runs:
 
    $ dune trace cat | jq 'include "dune"; select(.cat == "cram") | .args | redactCommandTimes'
 
+``dune trace perfetto`` converts the trace to Perfetto's native protobuf
+format: each event with a duration becomes a slice on dune's main thread
+track, each spawned process a slice on a pool of ``job-NNN`` tracks, and
+everything else an instant. ``--text`` emits a human-readable dump of the
+same packets, which is what cram tests assert on.
+
+.. code:: console
+
+   $ dune trace perfetto -o trace.pb
+
 .. seealso:: :doc:`advanced/profiling-dune` for loading traces into chrome://tracing
 
 Guidelines

@@ -395,6 +395,12 @@ let local_libraries =
     ; special_builtin_support = None
     ; root_module = None
     }
+  ; { path = "vendor/perfetto/src"
+    ; main_module_name = Some "Perfetto"
+    ; include_subdirs = No
+    ; special_builtin_support = None
+    ; root_module = None
+    }
   ; { path = "src/dune_rpc_impl"
     ; main_module_name = Some "Dune_rpc_impl"
     ; include_subdirs = No
@@ -465,6 +471,7 @@ let main =
             ; "OpamTypes"
             ; "OpamTypesBase"
             ; "OpamVariable"
+            ; "Perfetto"
             ; "Predicate_lang"
             ; "Re"
             ; "Rpc"

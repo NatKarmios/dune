@@ -52,4 +52,11 @@ to Chrome trace format:
 
    $ dune trace cat --chrome-trace > trace.json
 
+For Perfetto specifically, ``dune trace perfetto`` produces its native
+protobuf format instead:
+
+.. code:: console
+
+   $ dune trace perfetto -o trace.pb
+
 .. _Perfetto: https://ui.perfetto.dev/
