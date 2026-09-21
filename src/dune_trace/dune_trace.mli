@@ -92,6 +92,7 @@ module Event : sig
     val start
       :  extra_args:(string * Sexp.t) list
       -> async_id:Async.id
+      -> forced_by:Forced_by.t option
       -> pid:Pid.t
       -> dir:Path.t option
       -> prog:string

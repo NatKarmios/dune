@@ -53,6 +53,20 @@ there:
   > " --slurp
   {"phase":"end","args":{"exit":3,"error":"exited with code 3","stderr":"boom\n","rusage":9}}
 
+The "graph" category is what tracks who forced what. Without it there is no
+forcer in scope to record, and the field is left off rather than emitted
+empty:
+
+  $ dune trace cat | jq -c "[ .[] | $spans | .args.forced_by ] | unique" --slurp
+  [null]
+
+With it, a process spawned to run a rule's action is attributed to that rule:
+
+  $ rm -rf _build
+  $ DUNE_TRACE=+graph dune build out.txt
+  $ dune trace cat | jq -r "$spans | .args.forced_by[0] // empty" | sort -u
+  rule
+
 A nested dune numbers its own spans from zero as well, and its events are
 folded into this trace file tagged with the digest of the action that ran it.
 Pairing spans on the number alone can therefore cross the two invocations, so

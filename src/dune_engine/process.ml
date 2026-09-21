@@ -877,6 +877,17 @@ module Result = struct
   ;;
 end
 
+(* Whether a spawn is traced, and what the "process" span records. The
+   forcer only means anything alongside a span, so it travels with the id
+   rather than as a second argument that has to be [None] whenever the id
+   is. *)
+type trace =
+  | No_trace
+  | Trace of
+      { async_id : Dune_trace.Event.Async.id
+      ; forced_by : Forced_by.t option
+      }
+
 let targets_of_purpose (purpose : Process_metadata.purpose) =
   match purpose with
   | Process_metadata.Internal_job -> None
@@ -980,7 +991,7 @@ let await ?cancellation ~timeout { response_file; pid; is_process_group_leader; 
 let spawn
       ?dir
       ?(env = Env.initial)
-      ~async_id
+      ~trace
       ~(prepared_outputs : prepared_outputs)
       ~(stdin : _ Io.t)
       ~queued
@@ -1055,13 +1066,14 @@ let spawn
       ?landlock
       ~cwd
   in
-  (match async_id with
-   | None -> ()
-   | Some async_id ->
+  (match trace with
+   | No_trace -> ()
+   | Trace { async_id; forced_by } ->
      Dune_trace.emit Process (fun () ->
        Dune_trace.Event.Process.start
          ~extra_args:[]
          ~async_id
+         ~forced_by
          ~targets:(targets_of_purpose metadata.purpose)
          ~pid
          ~dir
@@ -1205,7 +1217,7 @@ let exec_locally
          spawn
            ?dir
            ~env
-           ~async_id:None
+           ~trace:No_trace
            ~prepared_outputs
            ~stdin
            ~queued
@@ -1262,9 +1274,13 @@ let run_internal
   in
   Scheduler.with_job_slot ?cancellation (fun () ->
     let queued = Time.diff (Time.now ()) start in
-    (* The span pairing the process's begin and end. Both branches below need
-       it. *)
+    (* The span pairing the process's begin and end, and the forcer to record
+       on the begin. Both branches below need them, and reading the forcer
+       needs the fiber context we are in here. *)
     let async_id = Dune_trace.Event.Async.gen_id () in
+    let* forced_by =
+      if Dune_trace.enabled Process then Forced_by.get else Fiber.return None
+    in
     let dir =
       match dir with
       | None -> dir
@@ -1317,7 +1333,7 @@ let run_internal
         spawn
           ?dir
           ~env
-          ~async_id:(Some async_id)
+          ~trace:(Trace { async_id; forced_by })
           ~prepared_outputs
           ~stdin:stdin_from
           ~queued
@@ -1431,6 +1447,7 @@ let run_internal
           Dune_trace.Event.Process.start
             ~extra_args:trace_args
             ~async_id
+            ~forced_by
             ~targets:(targets_of_purpose metadata.purpose)
             ~pid:process_info.pid
             ~dir

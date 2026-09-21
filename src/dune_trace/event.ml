@@ -231,14 +231,24 @@ module Forced_by = struct
     | `Paths name -> Arg.string name :: items
   ;;
 
-  (* Strings go through the intern table, and the key is emitted even with no
-     forcer. *)
+  (* For graph events: strings go through the intern table, and the key is
+     emitted even with no forcer. *)
   let args ~ts = function
     | None -> [], [ "forced_by", Arg.list [] ]
     | Some forced_by ->
       let tag, strings = split forced_by in
       let intern_events, ids = Intern.strings ~ts strings in
       intern_events, [ "forced_by", Arg.list (parts tag (List.map ids ~f:Arg.int)) ]
+  ;;
+
+  (* For process events, which do not use the intern table: the common forcer
+     is a rule, carrying no string at all, so interning would buy nothing.
+     With no forcer the key is omitted rather than emitted empty. *)
+  let plain_args = function
+    | None -> []
+    | Some forced_by ->
+      let tag, strings = split forced_by in
+      [ "forced_by", Arg.list (parts tag (List.map strings ~f:Arg.string)) ]
   ;;
 end
 
@@ -670,6 +680,7 @@ module Process = struct
   let start
         ~extra_args
         ~async_id
+        ~forced_by
         ~pid
         ~dir
         ~prog
@@ -703,6 +714,7 @@ module Process = struct
           ; (match timeout with
              | None -> []
              | Some timeout -> [ "timeout", Arg.span timeout ])
+          ; Forced_by.plain_args forced_by
           ]
       in
       always @ extended @ extra_args
