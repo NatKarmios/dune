@@ -109,4 +109,28 @@ end
 (* Identifies one async span. [async_id] counts spans within a single dune
    invocation, and a nested dune's events are folded into the same stream
    tagged with its action digest, so it takes both to tell spans apart. *)
-let span_id ~digest ~async_id = sprintf "%s/%d" (Option.value digest ~default:"") async_id
+module Span_id = struct
+  module T = struct
+    (* Spans are numbered in the order they begin, so [async_id] comes first:
+       the derived comparison then puts one invocation's spans in trace
+       order. *)
+    type t =
+      { async_id : int
+      ; digest : string option
+      }
+
+    let repr =
+      Repr.record
+        "Span_id.t"
+        [ Repr.field "async_id" Repr.int ~get:(fun { async_id; _ } -> async_id)
+        ; Repr.field "digest" (Repr.option Repr.string) ~get:(fun { digest; _ } -> digest)
+        ]
+    ;;
+  end
+
+  include T
+  include Repr.Poly (T)
+  include Repr.Make (T)
+
+  let make ~digest ~async_id = { async_id; digest }
+end
