@@ -43,3 +43,7 @@ module Span_id : sig
 
   include Table.Key with type t := t
 end
+
+(** The [--trace-file] option, resolved to the trace file to read: the one
+    given, or the closest [_build/trace.csexp] if none was. *)
+val term : string Term.t

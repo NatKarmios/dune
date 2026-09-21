@@ -134,3 +134,18 @@ module Span_id = struct
 
   let make ~digest ~async_id = { async_id; digest }
 end
+
+let term =
+  let+ trace_file =
+    Arg.(
+      value
+      & opt (some string) None
+      & info
+          [ "trace-file" ]
+          ~docv:"FILE"
+          ~doc:(Some "Read this trace file (default: _build/trace.csexp)"))
+  in
+  match trace_file with
+  | Some s -> s
+  | None -> Common.find_default_trace_file ()
+;;

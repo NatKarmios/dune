@@ -95,21 +95,8 @@ let info =
 
 let term =
   let+ debug_backtraces = Common.No_build.debug_backtraces
-  and+ trace_file =
-    Arg.(
-      value
-      & opt (some string) None
-      & info
-          [ "trace-file" ]
-          ~docv:"FILE"
-          ~doc:(Some "Read this trace file (default: _build/trace.json)"))
-  in
+  and+ trace_file = Trace_common.term in
   Common.No_build.set_debug_backtraces debug_backtraces;
-  let trace_file =
-    match trace_file with
-    | Some s -> s
-    | None -> Common.find_default_trace_file ()
-  in
   (* Begins are held until their end arrives, so a process is printed once it
      has finished -- and one that never finished is not printed at all. *)
   let open_spans = Table.create (module Span_id) 256 in

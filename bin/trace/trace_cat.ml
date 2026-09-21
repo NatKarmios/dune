@@ -79,11 +79,7 @@ let term =
       & info
           [ "chrome-trace" ]
           ~doc:(Some "print the trace file in the chrome event format"))
-  and+ trace_file =
-    Arg.(
-      value
-      & opt (some string) None
-      & info [ "trace-file" ] ~docv:"FILE" ~doc:(Some "Read this trace-file"))
+  and+ trace_file = Trace_common.term
   and+ follow =
     Arg.(
       value
@@ -142,11 +138,6 @@ let term =
     then (
       print sexp;
       if follow then flush stdout)
-  in
-  let trace_file =
-    match trace_file with
-    | Some s -> s
-    | None -> Common.find_default_trace_file ()
   in
   if follow
   then Event_sexp.iter_follow trace_file ~f:print_if_selected
