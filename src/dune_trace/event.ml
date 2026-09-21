@@ -76,7 +76,7 @@ module Event = struct
   ;;
 end
 
-module Async = struct
+module Complete = struct
   type data =
     { args : Event.args option
     ; cat : Category.t

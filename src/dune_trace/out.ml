@@ -112,19 +112,19 @@ let emit_runtime t =
       flush t))
 ;;
 
-let start t k : Event.Async.t option =
+let start t k : Event.Complete.t option =
   match t with
   | None -> None
   | Some _ ->
     let event_data = k () in
     let start = Time.now () in
-    Some (Event.Async.create ~event_data ~start)
+    Some (Event.Complete.create ~event_data ~start)
 ;;
 
 let finish t event =
   match event with
   | None -> ()
-  | Some { Event.Async.start; event_data = { args; cat; name } } ->
+  | Some { Event.Complete.start; event_data = { args; cat; name } } ->
     let dur =
       let stop = Time.now () in
       Time.diff stop start

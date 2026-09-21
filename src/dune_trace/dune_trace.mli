@@ -30,7 +30,7 @@ module Category : sig
 end
 
 module Event : sig
-  module Async : sig
+  module Complete : sig
     type t
     type data
 
@@ -336,8 +336,8 @@ module Out : sig
 
   val create : [ `Path of Path.t | `Fd of Fd.t ] -> t
   val emit : ?buffered:bool -> t -> Event.t -> unit
-  val start : t option -> (unit -> Event.Async.data) -> Event.Async.t option
-  val finish : t -> Event.Async.t option -> unit
+  val start : t option -> (unit -> Event.Complete.data) -> Event.Complete.t option
+  val finish : t -> Event.Complete.t option -> unit
 end
 
 val global : unit -> Out.t option

@@ -363,7 +363,7 @@ let fetch ~unpack ~checksum ~target ~url:(url_loc, url) =
   let event =
     Dune_trace.(
       Out.start (global ()) (fun () ->
-        Dune_trace.Event.Async.fetch
+        Dune_trace.Event.Complete.fetch
           ~url:(OpamUrl.to_string url)
           ~target
           ~checksum:(Option.map ~f:Checksum.to_string checksum)))

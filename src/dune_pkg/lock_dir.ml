@@ -1676,7 +1676,7 @@ struct
     let event =
       Dune_trace.(
         Out.start (global ()) (fun () ->
-          Event.Async.pkg_load_lock_dir ~path:(Path.to_string lock_dir_path)))
+          Event.Complete.pkg_load_lock_dir ~path:(Path.to_string lock_dir_path)))
     in
     let open Io.O in
     let* ( version
