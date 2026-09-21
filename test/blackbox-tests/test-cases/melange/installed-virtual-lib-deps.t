@@ -196,7 +196,7 @@ dependencies are followed through CMIs.
   > dune build --root consumer --sandbox=symlink --trace-file "$PWD/trace" @melange
   $ dune trace cat --trace-file "$PWD/trace" \
   > | jq_dune -s \
-  >   '[.[] | processesBrief | select(.prog == "melobjinfo")] | length'
+  >   '[ processesBrief | select(.prog == "melobjinfo") ] | length'
   1
 
   $ PATH="$PWD/fake-bin:$no_melobjinfo_path" \

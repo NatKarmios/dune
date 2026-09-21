@@ -43,16 +43,7 @@ events routed through the worker record the worker name and pid.
     },
     {
       "cat": "process",
-      "name": "start",
-      "args": {
-        "action_runner": "action-runner",
-        "action_runner_pid": "number",
-        "prog": "bash"
-      }
-    },
-    {
-      "cat": "process",
-      "name": "finish",
+      "name": "process",
       "args": {
         "action_runner": "action-runner",
         "action_runner_pid": "number",

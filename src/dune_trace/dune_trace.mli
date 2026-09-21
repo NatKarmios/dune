@@ -39,6 +39,12 @@ module Event : sig
     val pkg_load_lock_dir : path:string -> data
   end
 
+  module Async : sig
+    type id
+
+    val gen_id : unit -> id
+  end
+
   type t
 
   val sandbox
@@ -66,35 +72,36 @@ module Event : sig
     ; dirs : Filename.Set.t
     }
 
-  val process_start
-    :  extra_args:(string * Sexp.t) list
-    -> pid:Pid.t
-    -> dir:Path.t option
-    -> prog:string
-    -> args:string Array.Immutable.t
-    -> timeout:Time.Span.t option
-    -> started_at:Time.t
-    -> name:string option
-    -> categories:string list
-    -> targets:targets option
-    -> queued:Time.Span.t
-    -> t
+  (** A spawned process, as a single async span. The two ends share an
+      [Async.id] and repeat none of each other's fields. *)
+  module Process : sig
+    (** Emitted at [started_at], carrying everything known at spawn time. *)
+    val start
+      :  extra_args:(string * Sexp.t) list
+      -> async_id:Async.id
+      -> pid:Pid.t
+      -> dir:Path.t option
+      -> prog:string
+      -> args:string Array.Immutable.t
+      -> timeout:Time.Span.t option
+      -> started_at:Time.t
+      -> name:string option
+      -> categories:string list
+      -> targets:targets option
+      -> queued:Time.Span.t
+      -> t
 
-  val process
-    :  extra_args:(string * Sexp.t) list
-    -> name:string option
-    -> started_at:Time.t
-    -> targets:targets option
-    -> categories:string list
-    -> pid:Pid.t
-    -> exit:Exit_status.t
-    -> prog:string
-    -> process_args:string Array.Immutable.t
-    -> dir:Path.t option
-    -> stdout:string
-    -> stderr:string
-    -> times:Proc.Times.t
-    -> t
+    (** [stop] must be the process's own end time, not the time of the call,
+        so that the span covers exactly the process's lifetime. *)
+    val finish
+      :  async_id:Async.id
+      -> stop:Time.t
+      -> exit:Exit_status.t
+      -> stdout:string
+      -> stderr:string
+      -> resource_usage:Proc.Resource_usage.t option
+      -> t
+  end
 
   val unknown_process : Proc.Process_info.t -> t
 

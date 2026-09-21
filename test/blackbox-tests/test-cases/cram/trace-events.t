@@ -26,8 +26,9 @@ Demonstrate teh trace events emitted for running a cram test:
     ]
   }
 
-  $ dune trace cat | jq '
-  >   select(.cat == "process" and (.args.categories | index("cram")) and .name == "finish")
+  $ dune trace cat | jq_dune -s '
+  >   processSpans
+  > | select(.args.categories | index("cram"))
   > | .args
   > | { fields: keys, name }
   > '
@@ -40,6 +41,7 @@ Demonstrate teh trace events emitted for running a cram test:
       "pid",
       "process_args",
       "prog",
+      "queued",
       "rusage"
     ],
     "name": "test.t"

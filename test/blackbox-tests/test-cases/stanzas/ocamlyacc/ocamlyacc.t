@@ -39,5 +39,5 @@ The `flags` field passes additional arguments to `ocamlyacc`:
 
   $ dune build
   $ dune trace cat \
-  >   | jq_dune -c 'processesBrief | select(.prog == "ocamlyacc") | .args'
+  >   | jq_dune -s -c 'processesBrief | select(.prog == "ocamlyacc") | .args'
   ["-q","my_parser.mly"]

@@ -83,5 +83,5 @@ Flags support the ordered set language and variable expansion. In particular,
 
   $ dune build foo.cma
   $ dune trace cat \
-  >   | jq_dune -c 'processesBrief | select(.prog == "ocamllex") | .args'
+  >   | jq_dune -s -c 'processesBrief | select(.prog == "ocamllex") | .args'
   ["-ml","-q","-o","mod.ml","mod.mll"]

@@ -50,65 +50,95 @@ let base_of_sexp (sexp : Sexp.t) =
   | _ -> invalid_sexp sexp
 ;;
 
-type process_info =
+(* The "async_id" and "async_phase" of an async span, split off from the rest
+   of the event's arguments. *)
+let to_async_args rest =
+  let phase =
+    List.find_map rest ~f:(function
+      | Sexp.List [ Atom "async_phase"; Atom phase ] -> Some phase
+      | _ -> None)
+  in
+  let id =
+    List.find_map rest ~f:(function
+      | Sexp.List [ Atom "async_id"; Atom id ] -> int_of_string_opt id
+      | _ -> None)
+  in
+  let rest =
+    List.filter rest ~f:(function
+      | Sexp.List [ Atom ("async_phase" | "async_id"); _ ] -> false
+      | _ -> true)
+  in
+  phase, id, rest
+;;
+
+(* Identifies one async span. [async_id] counts spans within a single dune
+   invocation, and a nested dune's events are folded into the same stream
+   tagged with its action digest, so it takes both to tell spans apart. *)
+let span_id ~digest ~async_id = sprintf "%s/%d" (Option.value digest ~default:"") async_id
+
+(* The command a process ran is on the begin of its span, the outcome of
+   running it on the end. *)
+type spawned =
   { prog : string
   ; args : string list
   ; dir : string option
+  }
+
+type process_info =
+  { spawned : spawned
   ; exit_code : int
   ; error : string option
   ; stderr : string
   }
 
-let parse_process_event (sexp : Sexp.t) : process_info option =
-  match base_of_sexp sexp with
-  | "process", "finish", _ts, rest, _ ->
-    let rec extract_fields prog args dir exit error stderr = function
-      | [] -> prog, args, dir, exit, error, stderr
-      | Sexp.List [ Atom "process_args"; List arg_sexps ] :: rest ->
-        let args =
-          List.filter_map arg_sexps ~f:(function
-            | Sexp.Atom s -> Some s
-            | _ -> None)
-        in
-        extract_fields prog (Some args) dir exit error stderr rest
-      | List [ Atom "prog"; Atom p ] :: rest ->
-        extract_fields (Some p) args dir exit error stderr rest
-      | List [ Atom "dir"; Atom d ] :: rest ->
-        extract_fields prog args (Some d) exit error stderr rest
-      | List [ Atom "exit"; Atom e ] :: rest ->
-        let exit_code =
-          try int_of_string e with
-          | Failure _ -> 0
-        in
-        extract_fields prog args dir (Some exit_code) error stderr rest
-      | List [ Atom "error"; Atom err ] :: rest ->
-        extract_fields prog args dir exit (Some err) stderr rest
-      | List [ Atom "stderr"; Atom s ] :: rest ->
-        extract_fields prog args dir exit error (Some s) rest
-      | _ :: rest -> extract_fields prog args dir exit error stderr rest
-    in
-    let prog, args, dir, exit, error, stderr =
-      extract_fields None None None None None None rest
-    in
-    Option.map prog ~f:(fun prog ->
-      { prog
-      ; args = Option.value args ~default:[]
-      ; dir
-      ; exit_code = Option.value exit ~default:0
-      ; error
-      ; stderr = Option.value stderr ~default:""
-      })
+let field key rest =
+  List.find_map rest ~f:(function
+    | Sexp.List [ Atom k; v ] when String.equal k key -> Some v
+    | _ -> None)
+;;
+
+let atom key rest =
+  match field key rest with
+  | Some (Sexp.Atom s) -> Some s
   | _ -> None
 ;;
 
-let format_shell_command (info : process_info) : string =
+(* A begin without a "prog" says nothing about what ran, so its span is
+   dropped: the end will then find nothing held for it and drop too. *)
+let parse_begin rest =
+  Option.map (atom "prog" rest) ~f:(fun prog ->
+    let args =
+      match field "process_args" rest with
+      | Some (List args) ->
+        List.filter_map args ~f:(function
+          | Sexp.Atom s -> Some s
+          | _ -> None)
+      | _ -> []
+    in
+    { prog; args; dir = atom "dir" rest })
+;;
+
+let parse_end spawned rest =
+  let exit_code =
+    match Option.bind (atom "exit" rest) ~f:int_of_string_opt with
+    | None -> 0
+    | Some code -> code
+  in
+  { spawned
+  ; exit_code
+  ; error = atom "error" rest
+  ; stderr = Option.value (atom "stderr" rest) ~default:""
+  }
+;;
+
+let format_shell_command ({ prog; args; dir } : spawned) : string =
   let module Escape = Escape0 in
   let cmd =
-    let quoted_prog = Escape.quote_if_needed info.prog in
-    let quoted_args = List.map info.args ~f:Escape.quote_if_needed in
+    let quoted_prog = Escape.quote_if_needed prog in
+    let quoted_args = List.map args ~f:Escape.quote_if_needed in
     String.concat ~sep:" " (quoted_prog :: quoted_args)
   in
-  match info.dir with
+  match dir with
   | None -> sprintf "(%s)" cmd
   | Some dir ->
     let dir = Escape.quote_if_needed dir in
@@ -116,7 +146,7 @@ let format_shell_command (info : process_info) : string =
 ;;
 
 let format_output (info : process_info) : string =
-  let cmd_line = format_shell_command info in
+  let cmd_line = format_shell_command info.spawned in
   if info.exit_code = 0
   then cmd_line
   else (
@@ -172,6 +202,7 @@ let pid = lazy (Unix.getpid ())
 let json_of_event ~chrome (sexp : Sexp.t) =
   let cat, name, ts, rest, _ = base_of_sexp sexp in
   let ts, dur = times_of_sexp ts in
+  let async_phase, async_id, rest = to_async_args rest in
   let rest =
     List.map rest ~f:(function
       | Sexp.List [ Atom ("process_args" as k); List v ] ->
@@ -200,14 +231,32 @@ let json_of_event ~chrome (sexp : Sexp.t) =
       ]
   in
   match chrome with
-  | false -> Json.assoc base
+  | false ->
+    let async_fields =
+      (match async_phase with
+       | None -> []
+       | Some phase -> [ "async_phase", Json.string phase ])
+      @
+      match async_id with
+      | None -> []
+      | Some id -> [ "async_id", Json.int id ]
+    in
+    Json.assoc (base @ async_fields)
   | true ->
     let kind =
-      match dur with
-      | None -> "i"
-      | Some _ -> "X"
+      match async_phase, dur with
+      | Some "begin", _ -> "b"
+      | Some "end", _ -> "e"
+      | Some _, _ | None, None -> "i"
+      | None, Some _ -> "X"
     in
-    Json.assoc (base @ [ "ph", Json.string kind; "pid", Json.int (Lazy.force pid) ])
+    let id_field =
+      match async_phase, async_id with
+      | Some _, Some id -> [ "id", Json.int id ]
+      | _ -> []
+    in
+    Json.assoc
+      (base @ [ "ph", Json.string kind; "pid", Json.int (Lazy.force pid) ] @ id_field)
 ;;
 
 let cat =
@@ -328,12 +377,28 @@ let commands =
       | Some s -> s
       | None -> Common.find_default_trace_file ()
     in
+    (* Begins are held until their end arrives, so a process is printed once it
+       has finished -- and one that never finished is not printed at all. *)
+    let open_spans = String.Table.create 256 in
     iter_sexps trace_file ~f:(fun sexp ->
-      match parse_process_event sexp with
-      | Some info ->
-        let output = format_output info in
-        print_endline output
-      | None -> ())
+      match base_of_sexp sexp with
+      | "process", "process", _ts, rest, digest ->
+        let async_phase, async_id, rest = to_async_args rest in
+        (match async_phase, async_id with
+         | Some "begin", Some async_id ->
+           (match parse_begin rest with
+            | None -> ()
+            | Some spawned ->
+              String.Table.set open_spans (span_id ~digest ~async_id) spawned)
+         | Some "end", Some async_id ->
+           let span_id = span_id ~digest ~async_id in
+           (match String.Table.find open_spans span_id with
+            | None -> ()
+            | Some spawned ->
+              String.Table.remove open_spans span_id;
+              print_endline (format_output (parse_end spawned rest)))
+         | _ -> ())
+      | _ -> ())
   in
   Cmd.v info term
 ;;

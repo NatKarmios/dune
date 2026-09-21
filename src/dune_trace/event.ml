@@ -74,6 +74,34 @@ module Event = struct
            ]
        @ record_args args)
   ;;
+
+  let async_phase ?(args = []) ~async_id ~phase ~name ts cat : t =
+    List
+      (base ~name cat
+       @ [ Arg.time ts ]
+       @ Arg.record [ "async_id", Arg.int async_id; "async_phase", Arg.string phase ]
+       @ record_args args)
+  ;;
+
+  let async_begin ?args ~async_id ~name ts cat =
+    async_phase ?args ~async_id ~phase:"begin" ~name ts cat
+  ;;
+
+  let async_end ?args ~async_id ~name ts cat =
+    async_phase ?args ~async_id ~phase:"end" ~name ts cat
+  ;;
+end
+
+module Async = struct
+  type id = int
+
+  let next_id = ref 0
+
+  let gen_id () =
+    let id = !next_id in
+    incr next_id;
+    id
+  ;;
 end
 
 module Complete = struct
@@ -536,97 +564,72 @@ let make_exit exit =
     ]
 ;;
 
-let process_start
-      ~extra_args
-      ~pid
-      ~dir
-      ~prog
-      ~args
-      ~timeout
-      ~started_at
-      ~name
-      ~categories
-      ~targets
-      ~queued
-  =
-  let args =
-    let always =
-      [ "process_args", Arg.array args ~f:Arg.string
-      ; "pid", Arg.int (Pid.to_int pid)
-      ; "categories", Arg.list (List.map categories ~f:Arg.string)
-      ; "queued", Arg.span queued
-      ]
-    in
-    let extended =
-      List.concat
-        [ [ "prog", Arg.string prog
-          ; "dir", Arg.path (Option.value dir ~default:Path.root)
-          ]
-        ; (match targets with
-           | None -> []
-           | Some targets -> args_of_targets targets)
-        ; (match name with
-           | None -> []
-           | Some name -> [ "name", Arg.string name ])
-        ; (match timeout with
-           | None -> []
-           | Some timeout -> [ "timeout", Arg.span timeout ])
+(* A spawned process is one async span: the begin carries everything known
+   at spawn time, the end everything the process's exit reports. Nothing is
+   repeated across the two -- the [async_id] is what pairs them. *)
+module Process = struct
+  let start
+        ~extra_args
+        ~async_id
+        ~pid
+        ~dir
+        ~prog
+        ~args
+        ~timeout
+        ~started_at
+        ~name
+        ~categories
+        ~targets
+        ~queued
+    =
+    let args =
+      let always =
+        [ "process_args", Arg.array args ~f:Arg.string
+        ; "pid", Arg.int (Pid.to_int pid)
+        ; "categories", Arg.list (List.map categories ~f:Arg.string)
+        ; "queued", Arg.span queued
         ]
+      in
+      let extended =
+        List.concat
+          [ [ "prog", Arg.string prog
+            ; "dir", Arg.path (Option.value dir ~default:Path.root)
+            ]
+          ; (match targets with
+             | None -> []
+             | Some targets -> args_of_targets targets)
+          ; (match name with
+             | None -> []
+             | Some name -> [ "name", Arg.string name ])
+          ; (match timeout with
+             | None -> []
+             | Some timeout -> [ "timeout", Arg.span timeout ])
+          ]
+      in
+      always @ extended @ extra_args
     in
-    always @ extended @ extra_args
-  in
-  Event.instant ~args ~name:"start" started_at Process
-;;
+    Event.async_begin ~args ~async_id ~name:"process" started_at Process
+  ;;
 
-let process
-      ~extra_args
-      ~name
-      ~started_at
-      ~targets
-      ~categories
-      ~pid
-      ~exit
-      ~prog
-      ~process_args
-      ~dir
-      ~stdout
-      ~stderr
-      ~times:{ Proc.Times.elapsed_time; resource_usage }
-  =
-  let args =
-    let always =
-      [ "process_args", Arg.array process_args ~f:Arg.string
-      ; "pid", Arg.int (Pid.to_int pid)
-      ; "categories", Arg.list (List.map categories ~f:Arg.string)
-      ]
-    in
-    let extended =
-      let exit = make_exit exit in
+  (* [stop] is the process's own end time rather than now, so that the span
+     covers exactly the process's lifetime. *)
+  let finish ~async_id ~stop ~exit ~stdout ~stderr ~resource_usage =
+    let args =
       let output name s =
         match s with
         | "" -> []
         | s -> [ name, Arg.string s ]
       in
       List.concat
-        [ [ "prog", Arg.string prog
-          ; "dir", Arg.path (Option.value dir ~default:Path.root)
-          ]
-        ; exit
-        ; (match targets with
-           | None -> []
-           | Some targets -> args_of_targets targets)
+        [ make_exit exit
         ; output "stdout" stdout
         ; output "stderr" stderr
-        ; (match name with
-           | None -> []
-           | Some name -> [ "name", Arg.string name ])
+        ; make_rusage_args resource_usage
         ]
     in
-    let resource_usage = make_rusage_args resource_usage in
-    always @ extended @ resource_usage @ extra_args
-  in
-  Event.complete ~args ~start:started_at ~dur:elapsed_time ~name:"finish" Process
-;;
+    Event.async_end ~args ~async_id ~name:"process" stop Process
+  ;;
+end
 
 let unknown_process { Proc.Process_info.pid; status; end_time; resource_usage } =
   let now = Time.now () in

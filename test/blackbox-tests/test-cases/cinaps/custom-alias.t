@@ -11,5 +11,5 @@ Custom alias for the cinaps
   $ touch foo.ml
 
   $ dune build @foo
-  $ dune trace cat | jq_dune -c 'processesBrief | select(.prog == "cinaps")' | censor
+  $ dune trace cat | jq_dune -s -c 'processesBrief | select(.prog == "cinaps")' | censor
   {"prog":"cinaps","args":["-staged",".cinaps.$CINAPS/cinaps.ml-gen","foo.ml"],"exit":0}
