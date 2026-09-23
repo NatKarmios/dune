@@ -361,6 +361,14 @@ and exec_memo_eval : type i o m. (i, o) memo -> i -> m eval_mode -> (o * m) Memo
     reach_memoized reached (Memo.exec (Lazy.force memo.reaching) i)
 ;;
 
+(* The cutoff of a [reaching] node: that of its eager counterpart on success.
+   Errors always count as changed. *)
+let reaching_cutoff equal (a : _ reaching) (b : _ reaching) =
+  match a.result, b.result with
+  | Ok a, Ok b -> equal a b
+  | Ok _, Error _ | Error _, Ok _ | Error _, Error _ -> false
+;;
+
 (* Errors are kept as a value only if Memo may cache them: a node holding a
    non-reproducible error must be recomputed, and one that saw a cycle has
    inaccurate deps. Errors from inner nodes arrive without their
@@ -393,14 +401,16 @@ let memoize ?cutoff name t =
        in
        Memo.lazy_ ?cutoff ~name:(name ^ "(lazy)") (fun () -> eval t Lazy))
   in
+  let eager_cutoff =
+    Option.map cutoff ~f:(fun equal x y -> Tuple.T2.equal equal Dep.Facts.equal x y)
+  in
   let eager =
-    let cutoff =
-      Option.map cutoff ~f:(fun equal x y -> Tuple.T2.equal equal Dep.Facts.equal x y)
-    in
-    Memo.lazy_ ?cutoff ~name:(name ^ "(eager)") (fun () -> eval t Eager)
+    Memo.lazy_ ?cutoff:eager_cutoff ~name:(name ^ "(eager)") (fun () -> eval t Eager)
   in
   let reaching =
-    lazy (Memo.lazy_ ~name:(name ^ "(reaching)") (fun () -> eval_reaching t))
+    lazy
+      (let cutoff = Option.map eager_cutoff ~f:reaching_cutoff in
+       Memo.lazy_ ?cutoff ~name:(name ^ "(reaching)") (fun () -> eval_reaching t))
   in
   Memoize { lazy_; eager; reaching }
 ;;
@@ -444,18 +454,23 @@ let create_memo name ~input ?cutoff ?human_readable_description f =
        let name = name ^ "(lazy)" in
        Memo.create name ~input ?cutoff ?human_readable_description (fun x ->
          eval (f x) Lazy))
-  and eager =
+  and eager_cutoff =
+    Option.map cutoff ~f:(fun f (a, facts1) (b, facts2) ->
+      f a b && Dep.Facts.equal facts1 facts2)
+  in
+  let eager =
     lazy
-      (let cutoff =
-         Option.map cutoff ~f:(fun f (a, facts1) (b, facts2) ->
-           f a b && Dep.Facts.equal facts1 facts2)
-       in
-       Memo.create name ~input ?cutoff ?human_readable_description (fun x ->
+      (Memo.create name ~input ?cutoff:eager_cutoff ?human_readable_description (fun x ->
          eval (f x) Eager))
   and reaching =
     lazy
-      (Memo.create (name ^ "(reaching)") ~input ?human_readable_description (fun x ->
-         eval_reaching (f x)))
+      (let cutoff = Option.map eager_cutoff ~f:reaching_cutoff in
+       Memo.create
+         (name ^ "(reaching)")
+         ~input
+         ?cutoff
+         ?human_readable_description
+         (fun x -> eval_reaching (f x)))
   in
   { lazy_; eager; reaching }
 ;;

@@ -33,4 +33,4 @@ How many times each rule was executed across the two builds:
   > '
   dune__exe__A.cmi 2
   dune__exe__A.cmx 2
-  main.exe 2
+  main.exe 1
