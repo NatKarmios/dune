@@ -415,7 +415,7 @@ let local_libraries =
     ; special_builtin_support = None
     ; root_module = None
     }
-  ; { path = "src/perfetto"
+  ; { path = "vendor/perfetto/src"
     ; main_module_name = Some "Perfetto"
     ; include_subdirs = No
     ; special_builtin_support = None

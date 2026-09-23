@@ -29,6 +29,24 @@ module Debug_annot = struct
   let array ~name xs = { annot_name = name; value = Array xs }
 end
 
+module Proto = struct
+  type t =
+    { number : int
+    ; value : value
+    }
+
+  and value =
+    | Varint of int
+    | Bool of bool
+    | String of string
+    | Message of t list
+
+  let varint ~field n = { number = field; value = Varint n }
+  let bool ~field b = { number = field; value = Bool b }
+  let string ~field s = { number = field; value = String s }
+  let message ~field fields = { number = field; value = Message fields }
+end
+
 module Track = struct
   type kind =
     | Process of { pid : int }
@@ -82,6 +100,7 @@ module Event = struct
     ; categories : string list
     ; debug_annots : Debug_annot.t list
     ; flow_ids : int list
+    ; extensions : Proto.t list
     ; track_uuid : int
     ; ts : int
     }
@@ -91,6 +110,7 @@ module Event = struct
         ?(categories = [])
         ?(debug_annots = [])
         ?(flow_ids = [])
+        ?(extensions = [])
         type_
         ~track_uuid
         ~ts
@@ -100,6 +120,7 @@ module Event = struct
     ; categories
     ; debug_annots
     ; flow_ids
+    ; extensions
     ; track_uuid
     ; ts
     }
@@ -109,6 +130,7 @@ end
 type packet =
   | Track_descriptor of Track.t
   | Track_event of Event.t
+  | Extension_descriptor of Proto.t list
 
 (* All packets from a single writer share one non-zero sequence id; without it
    Perfetto silently drops track events. *)
@@ -171,12 +193,14 @@ module Interned = struct
     ; category_iids : int list
     ; debug_annots : Debug_annot.t list
     ; flow_ids : int list
+    ; extensions : Proto.t list
     ; track_uuid : int
     ; ts : int
     }
 
   type packet =
     | ITrack_descriptor of Track.t
+    | IExtension_descriptor of Proto.t list
     | ITrack_event of
         { ievent : event
         ; interned : Entries.t
@@ -284,6 +308,7 @@ module Interned = struct
         ; categories
         ; debug_annots
         ; flow_ids
+        ; extensions
         ; track_uuid
         ; ts
         }
@@ -300,6 +325,7 @@ module Interned = struct
           ; category_iids
           ; debug_annots
           ; flow_ids
+          ; extensions
           ; track_uuid
           ; ts
           }
@@ -311,13 +337,14 @@ module Interned = struct
   let packet ~tbls = function
     | Track_descriptor t -> ITrack_descriptor t
     | Track_event e -> event ~tbls e
+    | Extension_descriptor fields -> IExtension_descriptor fields
   ;;
 
   (* Rewrite a packet stream into its interned form. A single left-to-right
      walk assigns iids on first sight and emits the new entries on the packet
      that first uses them, so interned data always precedes (or accompanies)
-     its first reference in the sequence. Track descriptors carry no interned
-     data. *)
+     its first reference in the sequence. Track and extension descriptors
+     carry no interned data. *)
   let packets ps =
     let tbls = Tables.create () in
     List.map ps ~f:(packet ~tbls)
@@ -408,6 +435,15 @@ module To_bytes = struct
     | String_iid iid -> Wire.varint_field buf ~field:17 iid
   ;;
 
+  let rec proto buf { Proto.number; value } =
+    match value with
+    | Varint n -> Wire.varint_field buf ~field:number n
+    | Bool b -> Wire.bool_field buf ~field:number b
+    | String s -> Wire.string_field buf ~field:number s
+    | Message fields ->
+      Wire.message_field buf ~field:number (fun b -> List.iter fields ~f:(proto b))
+  ;;
+
   let event buf (e : Interned.event) =
     Wire.varint_field buf ~field:9 (Event.Type.enum e.type_);
     (match e.name_iid with
@@ -417,7 +453,8 @@ module To_bytes = struct
     Wire.varint_field buf ~field:11 e.track_uuid;
     List.iter e.debug_annots ~f:(fun a ->
       Wire.message_field buf ~field:4 (fun b -> debug_annot b a));
-    List.iter e.flow_ids ~f:(fun id -> Wire.fixed64_field buf ~field:47 (Int64.of_int id))
+    List.iter e.flow_ids ~f:(fun id -> Wire.fixed64_field buf ~field:47 (Int64.of_int id));
+    List.iter e.extensions ~f:(proto buf)
   ;;
 
   (* Each interned entry is a two-field message [iid=1, name/str=2]; the entry
@@ -457,6 +494,13 @@ module To_bytes = struct
       Wire.message_field buf ~field:1 (fun p ->
         Wire.varint_field p ~field:10 trusted_packet_sequence_id;
         Wire.message_field p ~field:60 (fun b -> track b t))
+    | IExtension_descriptor fields ->
+      (* TracePacket.extension_descriptor (72) holds an ExtensionDescriptor whose
+         extension_set (1) is the FileDescriptorSet. *)
+      Wire.message_field buf ~field:1 (fun p ->
+        Wire.varint_field p ~field:10 trusted_packet_sequence_id;
+        Wire.message_field p ~field:72 (fun ed ->
+          Wire.message_field ed ~field:1 (fun es -> List.iter fields ~f:(proto es))))
     | ITrack_event { ievent = e; interned; sequence_flags } ->
       Wire.message_field buf ~field:1 (fun p ->
         Wire.varint_field p ~field:8 e.ts;
@@ -507,6 +551,18 @@ module To_text = struct
         line "}")
   ;;
 
+  let rec proto b indent { Proto.number; value } =
+    let line fmt = line b indent fmt in
+    match value with
+    | Varint n -> line "%d: %d" number n
+    | Bool x -> line "%d: %b" number x
+    | String s -> line "%d: %S" number s
+    | Message fields ->
+      line "%d {" number;
+      List.iter fields ~f:(proto b (indent + 1));
+      line "}"
+  ;;
+
   let track b indent (t : Track.t) =
     let line i fmt = line b i fmt in
     line indent "track_descriptor {";
@@ -542,7 +598,8 @@ module To_text = struct
       line "debug_annotations {";
       debug_annot b (indent + 1) a;
       line "}");
-    List.iter e.flow_ids ~f:(fun id -> line "flow_ids: %d" id)
+    List.iter e.flow_ids ~f:(fun id -> line "flow_ids: %d" id);
+    List.iter e.extensions ~f:(proto b indent)
   ;;
 
   let interned_entries b indent (i : Interned.Entries.t) =
@@ -565,6 +622,12 @@ module To_text = struct
       line b 0 "packet {";
       (match packet with
        | Interned.ITrack_descriptor t -> track b 1 t
+       | IExtension_descriptor fields ->
+         line b 1 "extension_descriptor {";
+         line b 2 "extension_set {";
+         List.iter fields ~f:(proto b 3);
+         line b 2 "}";
+         line b 1 "}"
        | ITrack_event { ievent = e; interned; sequence_flags } ->
          line b 1 "timestamp: %d" e.ts;
          line b 1 "sequence_flags: %d" sequence_flags;

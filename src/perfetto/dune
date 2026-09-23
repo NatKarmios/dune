@@ -1,3 +1,0 @@
-(library
- (name perfetto)
- (synopsis "Emit Perfetto protobuf traces, compatible with ui.perfetto.dev"))

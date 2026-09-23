@@ -35,6 +35,19 @@ module Debug_annot : sig
   val array : name:string -> t list -> t
 end
 
+(** A hand-assembled protobuf field, for the parts of the Perfetto schema with
+    no dedicated constructor: [TrackEvent] extension fields and the
+    [FileDescriptorSet] that tells Perfetto how to decode them. A message is a
+    [t list]; express a repeated field by repeating its [field] number. *)
+module Proto : sig
+  type t
+
+  val varint : field:int -> int -> t
+  val bool : field:int -> bool -> t
+  val string : field:int -> string -> t
+  val message : field:int -> t list -> t
+end
+
 (** A track: a horizontal lane in the Perfetto UI that events are placed on.
     [uuid] is any trace-unique identifier; events reference it by
     [track_uuid]. *)
@@ -62,11 +75,15 @@ module Event : sig
 
   type t
 
+  (** [extensions] are fields appended to the [TrackEvent] message at their own
+      field numbers. Perfetto decodes them via a matching
+      {!Extension_descriptor} packet. *)
   val create
     :  ?name:string
     -> ?categories:string list
     -> ?debug_annots:Debug_annot.t list
     -> ?flow_ids:int list
+    -> ?extensions:Proto.t list
     -> Type.t
     -> track_uuid:int
     -> ts:int (** nanoseconds *)
@@ -76,6 +93,9 @@ end
 type packet =
   | Track_descriptor of Track.t
   | Track_event of Event.t
+  | Extension_descriptor of Proto.t list
+  (** The fields of a [FileDescriptorSet] describing the {!Event} [extensions],
+      so Perfetto can decode them. Emit once, before the events that use it. *)
 
 (** Serialise to the binary protobuf format read by [ui.perfetto.dev]. *)
 val to_bytes : packet list -> string
