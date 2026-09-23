@@ -1,6 +1,7 @@
 (cram
  (applies_to
   watch-build-events.t
+  graph-watch-cutoff.t
   debug-event.t
   interrupted-watch-build-events.t)
  (enabled_if
