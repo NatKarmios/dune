@@ -294,19 +294,18 @@ once bang.txt has been built, which never happens.
   $ DUNE_TRACE=+graph dune build out3.txt 2>/dev/null
   [1]
 
-Nothing is forced by recovering deps:
+Only the rules the eager evaluation reached run; a-dir's never does:
 
   $ dune trace cat | jq -sr '
   >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
   >     ({}; .[$e.id | tostring] = $e.value)) as $names
-  >   | (reduce (.[] | select(.name == "exec-rule" and .async_phase == "begin")) as $b
-  >       ({}; .[$b.args.rule_id | tostring] =
-  >          $names[($b.args.target_files + $b.args.target_dirs)[0] | tostring])) as $rules
-  >   | [ .[] | select(.args.forced_by[0]? == "dep-recovery")
-  >       | .name + " " + $names[.args.dep | tostring]
-  >         + " <- recovering " + $rules[.args.forced_by[1] | tostring] ]
+  >   | [ .[] | select(.name == "exec-rule" and .async_phase == "begin")
+  >       | $names[(.args.target_files + .args.target_dirs)[0] | tostring]
+  >       | select(test("txt|dir")) ]
   >   | sort[]
   > '
+  bang.txt
+  out3.txt
 
 Nor is the directory target's rule executed, even when it would fail in its
 own right:
@@ -377,14 +376,13 @@ built.
   $ dune trace cat | jq -sr '
   >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
   >     ({}; .[$e.id | tostring] = $e.value)) as $names
-  >   | (reduce (.[] | select(.name == "exec-rule" and .async_phase == "begin")) as $b
-  >       ({}; .[$b.args.rule_id | tostring] =
-  >          $names[($b.args.target_files + $b.args.target_dirs)[0] | tostring])) as $rules
-  >   | [ .[] | select(.args.forced_by[0]? == "dep-recovery")
-  >       | .name + " " + $names[.args.dep | tostring]
-  >         + " <- recovering " + $rules[.args.forced_by[1] | tostring] ]
+  >   | [ .[] | select(.name == "exec-rule" and .async_phase == "begin")
+  >       | $names[(.args.target_files + .args.target_dirs)[0] | tostring]
+  >       | select(test("txt|dir")) ]
   >   | sort[]
   > '
+  bang.txt
+  out4.txt
 
 The rule's deps stop at the one that failed:
 

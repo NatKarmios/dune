@@ -203,7 +203,6 @@ end
 module Forced_by = struct
   type t =
     | Forced_by_rule of int
-    | Forced_by_dep_recovery of int
     | Forced_by_dep of string
     | Forced_by_dynamic_includes of Path.Source.t
     | Forced_by_gen_rules of Path.Build.t
@@ -215,7 +214,6 @@ module Forced_by = struct
      apart so that the strings can be interned before rendering. *)
   let split = function
     | Forced_by_rule id -> `Rule id, []
-    | Forced_by_dep_recovery id -> `Dep_recovery id, []
     | Forced_by_dep dep -> `Paths "dep", [ dep ]
     | Forced_by_dynamic_includes path ->
       `Paths "dynamic-includes", [ Path.Source.to_string path ]
@@ -230,7 +228,6 @@ module Forced_by = struct
   let parts tag items =
     match tag with
     | `Rule id -> [ Arg.string "rule"; Arg.int id ]
-    | `Dep_recovery id -> [ Arg.string "dep-recovery"; Arg.int id ]
     | `Paths name -> Arg.string name :: items
   ;;
 
