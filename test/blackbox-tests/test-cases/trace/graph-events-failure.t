@@ -350,3 +350,50 @@ own right:
   > '
   bang.txt action-fail
   out3.txt dep-fail
+
+The deps a failing memoized builder reached are not seen by the rule, since the
+builder is shared. Its lazy evaluation stands in for them, and that can still
+force a build the failure stopped. A rule's deps field is memoized: here the
+glob's directory is only known once bang.txt is built, so the eager evaluation
+never lists it, but the lazy one does, which builds a-dir.
+
+  $ rm -rf _build
+  $ cat >dune <<EOF
+  > (rule
+  >  (target (dir a-dir))
+  >  (action (bash "mkdir a-dir; touch a-dir/f")))
+  > (rule
+  >  (target bang.txt)
+  >  (action (bash "exit 1")))
+  > (rule
+  >  (target out4.txt)
+  >  (deps (glob_files %{dep:bang.txt}/../a-dir/*))
+  >  (action (with-stdout-to out4.txt (echo hi))))
+  > EOF
+
+  $ DUNE_TRACE=+graph dune build out4.txt 2>/dev/null
+  [1]
+
+  $ dune trace cat | jq -sr '
+  >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
+  >     ({}; .[$e.id | tostring] = $e.value)) as $names
+  >   | (reduce (.[] | select(.name == "exec-rule" and .async_phase == "begin")) as $b
+  >       ({}; .[$b.args.rule_id | tostring] =
+  >          $names[($b.args.target_files + $b.args.target_dirs)[0] | tostring])) as $rules
+  >   | [ .[] | select(.args.forced_by[0]? == "dep-recovery")
+  >       | .name + " " + $names[.args.dep | tostring]
+  >         + " <- recovering " + $rules[.args.forced_by[1] | tostring] ]
+  >   | sort[]
+  > '
+  build-dep _build/default/a-dir <- recovering out4.txt
+
+The recovered deps include the glob, which the eager evaluation never reached:
+
+  $ dune trace cat | jq -sc '
+  >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
+  >     ({}; .[$e.id | tostring] = $e.value)) as $names
+  >   | [ .[] | select(.name == "exec-rule" and .async_phase == "end"
+  >                    and .args.rule_outcome == "dep-fail")
+  >       | [ (.args.deps // [])[] | $names[tostring] ] ]
+  > '
+  [["_build/default/bang.txt","_build/default/a-dir/*"]]
