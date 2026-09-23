@@ -314,3 +314,48 @@ deps were being recovered:
   >   | sort[]
   > '
   build-dep _build/default/a-dir <- recovering out3.txt
+
+A build forced by the recovery can fail in its own right. Its error is not
+reported to the user, but its action still runs: a-dir's rule executes and
+fails although nothing the user asked for needs it.
+
+  $ rm -rf _build
+  $ cat >dune <<EOF
+  > (rule
+  >  (target (dir a-dir))
+  >  (action (bash "exit 1")))
+  > (rule
+  >  (target bang.txt)
+  >  (action (bash "exit 1")))
+  > (rule
+  >  (target out3.txt)
+  >  (action
+  >   (progn
+  >    (with-stdout-to out3.txt (echo hi))
+  >    (diff? %{dep:bang.txt} out3.txt)
+  >    (diff? a-dir/f out3.txt))))
+  > EOF
+
+  $ DUNE_TRACE=+graph dune build out3.txt
+  File "dune", lines 4-6, characters 0-51:
+  4 | (rule
+  5 |  (target bang.txt)
+  6 |  (action (bash "exit 1")))
+  Command exited with code 1.
+  [1]
+
+  $ dune trace cat | jq -sr '
+  >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
+  >     ({}; .[$e.id | tostring] = $e.value)) as $names
+  >   | (reduce (.[] | select(.name == "exec-rule" and .async_phase == "begin")) as $b
+  >       ({}; .[$b.async_id | tostring] =
+  >          $names[($b.args.target_files + $b.args.target_dirs)[0] | tostring])) as $targets
+  >   | [ .[] | select(.name == "exec-rule" and .async_phase == "end")
+  >       | ($targets[.async_id | tostring]) as $t
+  >       | select($t | test("txt|dir"))
+  >       | $t + " " + .args.rule_outcome ]
+  >   | sort[]
+  > '
+  a-dir action-fail
+  bang.txt action-fail
+  out3.txt dep-fail
