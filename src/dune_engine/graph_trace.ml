@@ -30,7 +30,6 @@ module Forced_by = struct
   include Forced_by
 
   let rule ~rule:{ Rule.id; _ } = Forced_by_rule (Rule.Id.to_int id)
-  let dep_recovery ~rule:{ Rule.id; _ } = Forced_by_dep_recovery (Rule.Id.to_int id)
   let dep ~dep = Forced_by_dep (dep_to_string dep)
   let dynamic_includes ~dune_file = Forced_by_dynamic_includes dune_file
   let gen_rules ~dir = Forced_by_gen_rules dir
@@ -114,7 +113,7 @@ module Build_dep = struct
     if enabled Category.Graph
     then (
       let dep = Dep.alias alias in
-      let reached = Action_builder.Reached.create ~recovery:(Forced_by.dep ~dep) in
+      let reached = Action_builder.Reached.create () in
       start
         ~dep
         ~resolution_of:(fun (facts : Dep.Facts.t list) ->
@@ -228,9 +227,7 @@ module Exec_rule = struct
            Graph.Exec_rule_action.finish ~async_id);
          result
        in
-       let reached =
-         Action_builder.Reached.create ~recovery:(Forced_by.dep_recovery ~rule)
-       in
+       let reached = Action_builder.Reached.create () in
        Fiber.collect_errors (fun () ->
          Forced_by.set
            ~new_forcer

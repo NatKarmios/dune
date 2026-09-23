@@ -351,11 +351,11 @@ own right:
   bang.txt action-fail
   out3.txt dep-fail
 
-The deps a failing memoized builder reached are not seen by the rule, since the
-builder is shared. Its lazy evaluation stands in for them, and that can still
-force a build the failure stopped. A rule's deps field is memoized: here the
-glob's directory is only known once bang.txt is built, so the eager evaluation
-never lists it, but the lazy one does, which builds a-dir.
+The same holds through a memoized builder, which is shared between rules: it
+keeps the deps it reached alongside its failure, so each rule using it reports
+them. A rule's deps field is memoized; here the glob's directory is only known
+once bang.txt is built, so the glob is never reached and a-dir is never
+built.
 
   $ rm -rf _build
   $ cat >dune <<EOF
@@ -385,9 +385,8 @@ never lists it, but the lazy one does, which builds a-dir.
   >         + " <- recovering " + $rules[.args.forced_by[1] | tostring] ]
   >   | sort[]
   > '
-  build-dep _build/default/a-dir <- recovering out4.txt
 
-The recovered deps include the glob, which the eager evaluation never reached:
+The rule's deps stop at the one that failed:
 
   $ dune trace cat | jq -sc '
   >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
@@ -396,4 +395,4 @@ The recovered deps include the glob, which the eager evaluation never reached:
   >                    and .args.rule_outcome == "dep-fail")
   >       | [ (.args.deps // [])[] | $names[tostring] ] ]
   > '
-  [["_build/default/bang.txt","_build/default/a-dir/*"]]
+  [["_build/default/bang.txt"]]

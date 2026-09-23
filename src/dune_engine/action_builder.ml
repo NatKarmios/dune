@@ -2,17 +2,14 @@ open Import
 
 module Reached = struct
   type t =
-    { recovery : Forced_by.t
-    ; mutable started : bool
+    { mutable started : bool
     ; mutable hidden : bool
     ; mutable deps : Dep.Set.t
     }
 
-  let create ~recovery =
-    { recovery; started = false; hidden = false; deps = Dep.Set.empty }
-  ;;
+  let create () = { started = false; hidden = false; deps = Dep.Set.empty }
 
-  let deps { recovery = _; started; hidden; deps } =
+  let deps { started; hidden; deps } =
     match started, hidden with
     | true, false -> Some deps
     | false, _ | true, true -> None
@@ -52,14 +49,24 @@ module Deps_or_facts = struct
   ;;
 end
 
+(* A memoized builder's [Eager_reaching] evaluation. Its errors are kept as a
+   value, alongside the deps it reached, so that every caller sees those deps;
+   callers re-raise the same errors. *)
+type 'a reaching =
+  { result : ('a * Dep.Facts.t, Exn_with_backtrace.t list) result
+  ; reached : Dep.Set.t option
+  }
+
 type 'a memoized =
   { lazy_ : ('a * Dep.Set.t) Memo.Lazy.t Lazy.t
   ; eager : ('a * Dep.Facts.t) Memo.Lazy.t
+  ; reaching : 'a reaching Memo.Lazy.t Lazy.t
   }
 
 type ('input, 'output) memo =
   { lazy_ : ('input, 'output * Dep.Set.t) Memo.Table.t Lazy.t
   ; eager : ('input, 'output * Dep.Facts.t) Memo.Table.t Lazy.t
+  ; reaching : ('input, 'output reaching) Memo.Table.t Lazy.t
   }
 
 module T = struct
@@ -163,45 +170,27 @@ let watch_memo : type a m. m eval_mode -> a Memo.t -> a Memo.t =
     |> Memo.of_reproducible_fiber
 ;;
 
-(* A memoized builder is shared, so the deps it reached before failing are not
-   seen here. Its lazy evaluation stands in for them; this can force builds of
-   its own, attributed to [reached.recovery]. *)
-let reach_memoized
-      (reached : Reached.t)
-      (eager : unit -> ('a * Dep.Facts.t) Memo.t)
-      (lazy_ : unit -> ('a * Dep.Set.t) Memo.t)
-  =
-  let open Fiber.O in
-  Fiber.with_error_handler
-    (fun () ->
-       let+ ((_, facts) as res) = Memo.run (eager ()) in
-       Reached.add reached (Dep.Set.of_keys facts);
-       res)
-    ~on_error:(fun exn ->
-      let+ () =
-        match Scheduler.Run.caused_by_cancellation exn with
-        | true -> Fiber.return ()
-        | false ->
-          Fiber.collect_errors (fun () ->
-            Forced_by.set ~new_forcer:reached.recovery lazy_ ())
-          >>| (function
-           | Ok (_, deps) -> Reached.add reached deps
-           | Error (_ : Exn_with_backtrace.t list) -> reached.hidden <- true)
-      in
-      Exn_with_backtrace.reraise exn)
-  |> Memo.of_reproducible_fiber
+let reach_memoized (reached : Reached.t) (node : 'a reaching Memo.t) =
+  let open Memo.O in
+  let* { result; reached = node_reached } = watch_memo (Eager_reaching reached) node in
+  match result with
+  | Ok ((_, facts) as res) ->
+    Reached.add reached (Dep.Set.of_keys facts);
+    Memo.return res
+  | Error exns ->
+    (match node_reached with
+     | Some deps -> Reached.add reached deps
+     | None -> reached.hidden <- true);
+    Memo.of_reproducible_fiber (Fiber.reraise_all exns)
 ;;
 
 let force_memoized : type a m. m eval_mode -> a memoized -> (a * m) Memo.t =
-  fun mode { lazy_; eager } ->
+  fun mode { lazy_; eager; reaching } ->
   match mode with
   | Lazy -> Memo.Lazy.force (Lazy.force lazy_)
   | Eager -> Memo.Lazy.force eager
   | Eager_reaching reached ->
-    reach_memoized
-      reached
-      (fun () -> Memo.Lazy.force eager)
-      (fun () -> Memo.Lazy.force (Lazy.force lazy_))
+    reach_memoized reached (Memo.Lazy.force (Lazy.force reaching))
 ;;
 
 let rec eval : type a m. a t -> m eval_mode -> (a * m) Memo.t =
@@ -369,10 +358,31 @@ and exec_memo_eval : type i o m. (i, o) memo -> i -> m eval_mode -> (o * m) Memo
   | Lazy -> Memo.exec (Lazy.force memo.lazy_) i
   | Eager -> Memo.exec (Lazy.force memo.eager) i
   | Eager_reaching reached ->
-    reach_memoized
-      reached
-      (fun () -> Memo.exec (Lazy.force memo.eager) i)
-      (fun () -> Memo.exec (Lazy.force memo.lazy_) i)
+    reach_memoized reached (Memo.exec (Lazy.force memo.reaching) i)
+;;
+
+(* Errors are kept as a value only if Memo may cache them: a node holding a
+   non-reproducible error must be recomputed, and one that saw a cycle has
+   inaccurate deps. Errors from inner nodes arrive without their
+   [Non_reproducible] marker, but those nodes always count as changed, so this
+   one is recomputed with them. *)
+let eval_reaching t =
+  let reached = Reached.create () in
+  reached.started <- true;
+  let open Fiber.O in
+  Fiber.collect_errors (fun () -> Memo.run (eval t (Eager_reaching reached)))
+  >>= (function
+   | Ok res -> Fiber.return { result = Ok res; reached = None }
+   | Error exns ->
+     (match
+        List.exists exns ~f:(fun { Exn_with_backtrace.exn; backtrace = _ } ->
+          match exn with
+          | Memo.Non_reproducible _ | Memo.Cycle_error.E _ -> true
+          | _ -> false)
+      with
+      | true -> Fiber.reraise_all exns
+      | false -> Fiber.return { result = Error exns; reached = Reached.deps reached }))
+  |> Memo.of_reproducible_fiber
 ;;
 
 let memoize ?cutoff name t =
@@ -389,7 +399,10 @@ let memoize ?cutoff name t =
     in
     Memo.lazy_ ?cutoff ~name:(name ^ "(eager)") (fun () -> eval t Eager)
   in
-  Memoize { lazy_; eager }
+  let reaching =
+    lazy (Memo.lazy_ ~name:(name ^ "(reaching)") (fun () -> eval_reaching t))
+  in
+  Memoize { lazy_; eager; reaching }
 ;;
 
 module Monad_instance = struct
@@ -439,8 +452,12 @@ let create_memo name ~input ?cutoff ?human_readable_description f =
        in
        Memo.create name ~input ?cutoff ?human_readable_description (fun x ->
          eval (f x) Eager))
+  and reaching =
+    lazy
+      (Memo.create (name ^ "(reaching)") ~input ?human_readable_description (fun x ->
+         eval_reaching (f x)))
   in
-  { lazy_; eager }
+  { lazy_; eager; reaching }
 ;;
 
 let push_stack_frame ~human_readable_description f =

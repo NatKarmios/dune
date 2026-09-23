@@ -94,9 +94,7 @@ val evaluate_and_collect_facts : 'a t -> ('a * Dep.Facts.t) Memo.t
 module Reached : sig
   type t
 
-  (** [recovery] is the forcer of any build run to recover deps that a failing
-      memoized builder reached. *)
-  val create : recovery:Forced_by.t -> t
+  val create : unit -> t
 
   (** [None] if no evaluation started, or if a failure hid some of the deps. *)
   val deps : t -> Dep.Set.t option
