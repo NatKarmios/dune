@@ -52,9 +52,9 @@ module Build_dep = struct
 
   (* Trace building [dep] as an async span: [f] runs with [forced_by] set to
      this dep and a [report] callback for its resolution, and the span ends
-     once [f] settles. If [f] raises without having reported, [on_failure]
-     supplies the resolution; a cancellation goes straight to [Unknown], since
-     the build is going away. *)
+     once [f] and everything it started have settled. If [f] raises without
+     having reported, [on_failure] supplies the resolution; a cancellation goes
+     straight to [Unknown], since the build is going away. *)
   let start ~(dep : Dep.t) ~resolution_of ~on_failure (f : ('b -> unit) -> 'a Memo.t)
     : 'a Memo.t
     =
@@ -70,48 +70,35 @@ module Build_dep = struct
           building does. *)
        let resolved = ref None in
        let report x = resolved := Some (resolution_of x) in
-       (* A span has at most one end, and the error handler below runs once
-          per error raised under the dep, so only the first call emits. *)
-       let finished = ref false in
-       let emit_finish resolution status =
-         if not !finished
-         then (
-           finished := true;
-           emit_finish ~async_id resolution status)
-       in
-       Fiber.with_error_handler
-         (fun () ->
-            let+ result = Forced_by.set ~new_forcer f report in
-            emit_finish
-              (Option.value !resolved ~default:Resolution.Unknown)
-              Status.Succeeded;
-            result)
-         ~on_error:(fun exn ->
-           let status =
-             match Import.Scheduler.Run.caused_by_cancellation exn with
-             | true -> Status.Cancelled
-             | false -> Status.Failed
-           in
-           let* () =
-             match !resolved, status with
-             | Some resolution, _ ->
-               emit_finish resolution status;
-               Fiber.return ()
-             | None, Status.Cancelled ->
-               emit_finish Resolution.Unknown status;
-               Fiber.return ()
-             | None, (Succeeded | Failed) ->
-               let+ resolution = on_failure () in
-               emit_finish resolution status
-           in
-           Exn_with_backtrace.reraise exn))
+       Fiber.collect_errors (fun () -> Forced_by.set ~new_forcer f report)
+       >>= function
+       | Ok result ->
+         emit_finish
+           ~async_id
+           (Option.value !resolved ~default:Resolution.Unknown)
+           Status.Succeeded;
+         Fiber.return result
+       | Error exns ->
+         let status =
+           match List.for_all exns ~f:Import.Scheduler.Run.caused_by_cancellation with
+           | true -> Status.Cancelled
+           | false -> Status.Failed
+         in
+         let resolution =
+           match !resolved, status with
+           | Some resolution, _ -> resolution
+           | None, Status.Cancelled -> Resolution.Unknown
+           | None, (Succeeded | Failed) -> on_failure ()
+         in
+         emit_finish ~async_id resolution status;
+         Fiber.reraise_all exns)
       |> Memo.of_reproducible_fiber)
     else f ignore
   ;;
 
   (* [file] and [file_selector] know their resolution before anything can
      fail, so a failure with none reported means there is none. *)
-  let unknown_on_failure () = Fiber.return Resolution.Unknown
+  let unknown_on_failure () = Resolution.Unknown
 
   let file (path : Path.t) f =
     start
@@ -123,22 +110,21 @@ module Build_dep = struct
       f
   ;;
 
-  (* Errors from [recover] are dropped: recovering a resolution must not
-     displace the failure being reported. *)
-  let alias (alias : Alias.t) ~recover f =
-    let dep = Dep.alias alias in
-    start
-      ~dep
-      ~resolution_of:(fun (facts : Dep.Facts.t list) ->
-        facts |> List.map ~f:Dep.Set.of_keys |> Dep.Set.union_all |> expanded)
-      ~on_failure:(fun () ->
-        Fiber.map
-          (Fiber.collect_errors (fun () ->
-             Forced_by.set ~new_forcer:(Forced_by.dep ~dep) recover ()))
-          ~f:(function
-            | Ok deps -> expanded deps
-            | Error (_ : Exn_with_backtrace.t list) -> Resolution.Unknown))
-      f
+  let alias (alias : Alias.t) f =
+    if enabled Category.Graph
+    then (
+      let dep = Dep.alias alias in
+      let reached = Action_builder.Reached.create ~recovery:(Forced_by.dep ~dep) in
+      start
+        ~dep
+        ~resolution_of:(fun (facts : Dep.Facts.t list) ->
+          facts |> List.map ~f:Dep.Set.of_keys |> Dep.Set.union_all |> expanded)
+        ~on_failure:(fun () ->
+          match Action_builder.Reached.deps reached with
+          | Some deps -> expanded deps
+          | None -> Resolution.Unknown)
+        (f (Some reached)))
+    else f None ignore
   ;;
 
   let file_selector (file_selector : File_selector.t) f =
@@ -175,24 +161,6 @@ module Exec_rule = struct
         }
   ;;
 
-  (* Recover the deps of a rule that failed before resolving them: [Lazy]
-     evaluation yields the same set as the [Eager] evaluation that failed,
-     without building anything, so it does not re-enter the failure. Errors
-     are dropped -- recovery must not displace the failure being reported. It
-     does run the rule's [Of_memo] nodes, which can force builds of their own,
-     hence the [dep_recovery] forcer. *)
-  let recover_deps (rule : Rule.t) =
-    Fiber.map
-      (Fiber.collect_errors (fun () ->
-         Forced_by.set
-           ~new_forcer:(Forced_by.dep_recovery ~rule)
-           (fun () -> Action_builder.evaluate_and_collect_deps rule.action)
-           ()))
-      ~f:(function
-        | Ok (_, deps) -> Some deps
-        | Error (_ : Exn_with_backtrace.t list) -> None)
-  ;;
-
   let emit_start
         ~rule:{ Rule.id; targets = { Targets.Validated.root; files; dirs }; _ }
         ~async_id
@@ -214,7 +182,8 @@ module Exec_rule = struct
   let start
         ~(rule : Rule.t)
         (f :
-          deps_resolved:(Dep.Facts.t -> unit)
+          reached:Action_builder.Reached.t option
+          -> deps_resolved:(Dep.Facts.t -> unit)
           -> trace_action:((unit -> 'b Fiber.t) -> 'b Fiber.t)
           -> finish:(dyn_deps:Dep.Set.t list -> outcome -> unit)
           -> 'a Memo.t)
@@ -229,8 +198,8 @@ module Exec_rule = struct
       (let* forced_by = Forced_by.get in
        let start = Time.now () in
        emit_start ~rule ~async_id ~forced_by ~start;
-       (* A span has at most one end, and the error handler below runs once
-          per error raised under the rule, so only the first call emits. *)
+       (* A span has at most one end, and [f] can still fail after calling
+          [finish], so only the first call emits. *)
        let finished = ref false in
        let emit_finish ~deps ~dyn_deps outcome =
          if not !finished
@@ -259,29 +228,29 @@ module Exec_rule = struct
            Graph.Exec_rule_action.finish ~async_id);
          result
        in
-       Fiber.with_error_handler
-         (fun () ->
-            Forced_by.set
-              ~new_forcer
-              (fun () -> f ~deps_resolved ~finish ~trace_action)
-              ())
-         ~on_error:(fun exn ->
-           let* () =
-             match Import.Scheduler.Run.caused_by_cancellation exn, !resolved with
-             | true, deps ->
-               emit_finish ~deps ~dyn_deps:[] Cancelled;
-               Fiber.return ()
-             | false, (Some _ as deps) ->
-               emit_finish ~deps ~dyn_deps:[] Action_fail;
-               Fiber.return ()
-             | false, None ->
-               let+ deps = recover_deps rule in
-               emit_finish ~deps ~dyn_deps:[] Dep_fail
-           in
-           Exn_with_backtrace.reraise exn))
+       let reached =
+         Action_builder.Reached.create ~recovery:(Forced_by.dep_recovery ~rule)
+       in
+       Fiber.collect_errors (fun () ->
+         Forced_by.set
+           ~new_forcer
+           (fun () -> f ~reached:(Some reached) ~deps_resolved ~finish ~trace_action)
+           ())
+       >>= function
+       | Ok result -> Fiber.return result
+       | Error exns ->
+         (match
+            List.for_all exns ~f:Import.Scheduler.Run.caused_by_cancellation, !resolved
+          with
+          | true, deps -> emit_finish ~deps ~dyn_deps:[] Cancelled
+          | false, (Some _ as deps) -> emit_finish ~deps ~dyn_deps:[] Action_fail
+          | false, None ->
+            emit_finish ~deps:(Action_builder.Reached.deps reached) ~dyn_deps:[] Dep_fail);
+         Fiber.reraise_all exns)
       |> Memo.of_reproducible_fiber)
     else
       f
+        ~reached:None
         ~deps_resolved:ignore
         ~finish:(fun ~dyn_deps:_ _ -> ())
         ~trace_action:(fun action -> action ())

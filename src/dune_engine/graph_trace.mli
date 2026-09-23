@@ -17,21 +17,25 @@ module Exec_rule : sig
     | Local_cache_hit
     | Shared_cache_hit
 
-  (** Trace the execution of [rule] as an "exec-rule" async span. [f] passes
-      the rule's facts to [deps_resolved] as soon as it has them, then calls
+  (** Trace the execution of [rule] as an "exec-rule" async span. [f]
+      evaluates the rule's action builder with
+      {!Action_builder.evaluate_and_collect_facts_reaching} on [reached],
+      passes the rule's facts to [deps_resolved] as soon as it has them, then
+      calls
       [finish] with the dynamic deps (one set per dynamic-deps stage) and the
       [outcome] to end the span. [trace_action] wraps the action's execution
       in a nested "exec-rule-action" span; cache hits never call it.
 
-      If [f] raises, the end is emitted here instead, carrying the deps
-      reported to [deps_resolved] if it got that far and otherwise deps
-      recovered from [rule] without building them, or none recorded if that
-      recovery fails too. A cancellation carries whatever was reported and
-      recovers nothing: the build is going away. A span has at most one end
+      If [f] raises, the end is emitted here instead, once everything [f]
+      started has settled. It carries the deps reported to [deps_resolved] if
+      [f] got that far, and otherwise the deps the evaluation reached, or none
+      recorded if a failure hid some of them. A cancellation carries whatever
+      was reported: the build is going away. A span has at most one end
       however it is reached. *)
   val start
     :  rule:Rule.t
-    -> (deps_resolved:(Dep.Facts.t -> unit)
+    -> (reached:Action_builder.Reached.t option
+        -> deps_resolved:(Dep.Facts.t -> unit)
         -> trace_action:((unit -> 'b Fiber.t) -> 'b Fiber.t)
         -> finish:(dyn_deps:Dep.Set.t list -> outcome -> unit)
         -> 'a Memo.t)
@@ -86,14 +90,12 @@ module Build_dep : sig
 
   (** An alias dep: the callback takes the facts the alias expanded to. Those
       are a product of the very building that may fail, so there is nothing
-      to report ahead of it; [recover] is called instead when [f] raises, and
-      should re-walk the alias's definitions to their deps without building
-      them. It is not called for a cancellation, nor if the facts were
-      already reported. *)
+      to report ahead of it; [f] instead evaluates the alias's definitions
+      with {!Action_builder.evaluate_and_collect_facts_reaching} on the
+      [reached] it is passed, and a failure reports the deps they reached. *)
   val alias
     :  Alias.t
-    -> recover:(unit -> Dep.Set.t Memo.t)
-    -> ((Dep.Facts.t list -> unit) -> 'a Memo.t)
+    -> (Action_builder.Reached.t option -> (Dep.Facts.t list -> unit) -> 'a Memo.t)
     -> 'a Memo.t
 
   (** A file-selector (glob) dep: the callback takes the files it matched.

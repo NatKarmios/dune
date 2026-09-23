@@ -90,6 +90,25 @@ val evaluate_and_collect_deps : 'a t -> ('a * Dep.Set.t) Memo.t
     Note that finding [t]'s facts requires building all of [t]'s dependencies. *)
 val evaluate_and_collect_facts : 'a t -> ('a * Dep.Facts.t) Memo.t
 
+(** The deps an evaluation reached, kept even when it fails part way. *)
+module Reached : sig
+  type t
+
+  (** [recovery] is the forcer of any build run to recover deps that a failing
+      memoized builder reached. *)
+  val create : recovery:Forced_by.t -> t
+
+  (** [None] if no evaluation started, or if a failure hid some of the deps. *)
+  val deps : t -> Dep.Set.t option
+end
+
+(** Like [evaluate_and_collect_facts], also recording in [reached] the deps
+    the evaluation reaches. *)
+val evaluate_and_collect_facts_reaching
+  :  Reached.t option
+  -> 'a t
+  -> ('a * Dep.Facts.t) Memo.t
+
 (** only used in the public rules *)
 val push_stack_frame
   :  human_readable_description:(unit -> User_message.Style.t Pp.t)

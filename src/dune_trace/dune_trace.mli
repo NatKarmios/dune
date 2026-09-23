@@ -48,8 +48,8 @@ module Event : sig
 
   type t
 
-  (** What forced the build a span belongs to. A dep recovered on behalf of a
-      rule that failed before resolving its deps carries
+  (** What forced the build a span belongs to. A dep built to recover the
+      deps that a failed memoized part of a rule's evaluation reached carries
       [Forced_by_dep_recovery] rather than [Forced_by_rule], so that it is
       clear it was forced after the rule had already failed. *)
   module Forced_by : sig

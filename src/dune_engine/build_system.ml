@@ -578,7 +578,7 @@ module Internal = struct
 
   and execute_rule_impl ~rule_kind rule =
     Graph_trace.Exec_rule.start ~rule
-    @@ fun ~deps_resolved ~trace_action ~finish ->
+    @@ fun ~reached ~deps_resolved ~trace_action ~finish ->
     let { Rule.id = _; targets; mode; action; info } = rule in
     let* execution_parameters =
       match Dpath.Target_dir.of_target targets.root with
@@ -595,7 +595,9 @@ module Internal = struct
        function [(Build_config.get ()).execution_parameters] is likely
        memoized, and the result is not expected to change often, so we do not
        sacrifice too much performance here by executing it sequentially. *)
-    let* action, facts = Action_builder.evaluate_and_collect_facts action in
+    let* action, facts =
+      Action_builder.evaluate_and_collect_facts_reaching reached action
+    in
     deps_resolved facts;
     let { Action.Full.action = action_ast; props } = action in
     let wrap_fiber f =
@@ -970,21 +972,15 @@ module Internal = struct
     | Action x -> dep_on_anonymous_action x
 
   and build_alias_impl alias =
-    Graph_trace.Build_dep.alias alias ~recover:(fun () ->
-      (* The same walk as below, but collecting deps rather than facts, so it
-         reaches the alias's expansion without building it. *)
-      Load_rules.get_alias_definition alias
-      >>= Memo.parallel_map ~f:(fun (_loc, definition) ->
-        Action_builder.evaluate_and_collect_deps (dep_on_alias_definition definition)
-        >>| snd)
-      >>| Dep.Set.union_all)
-    @@ fun trace_resolved ->
+    Graph_trace.Build_dep.alias alias
+    @@ fun reached trace_resolved ->
     let+ l =
       Load_rules.get_alias_definition alias
       >>= Memo.parallel_map ~f:(fun (loc, definition) ->
         Memo.push_stack_frame
           (fun () ->
-             Action_builder.evaluate_and_collect_facts
+             Action_builder.evaluate_and_collect_facts_reaching
+               reached
                (dep_on_alias_definition definition)
              >>| snd)
           ~human_readable_description:(fun () -> Alias.describe alias ~loc))

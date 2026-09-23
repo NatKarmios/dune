@@ -1,13 +1,36 @@
 open Import
 
+module Reached = struct
+  type t =
+    { recovery : Forced_by.t
+    ; mutable started : bool
+    ; mutable hidden : bool
+    ; mutable deps : Dep.Set.t
+    }
+
+  let create ~recovery =
+    { recovery; started = false; hidden = false; deps = Dep.Set.empty }
+  ;;
+
+  let deps { recovery = _; started; hidden; deps } =
+    match started, hidden with
+    | true, false -> Some deps
+    | false, _ | true, true -> None
+  ;;
+
+  let add t deps = t.deps <- Dep.Set.union t.deps deps
+end
+
 type 'a eval_mode =
   | Lazy : Dep.Set.t eval_mode
   | Eager : Dep.Facts.t eval_mode
+  | Eager_reaching : Reached.t -> Dep.Facts.t eval_mode
 
 module Deps_or_facts = struct
   let empty : type m. m eval_mode -> m = function
     | Lazy -> Dep.Set.empty
     | Eager -> Dep.Facts.empty
+    | Eager_reaching _ -> Dep.Facts.empty
   ;;
 
   let return : type a m. a -> m eval_mode -> a * m = fun a mode -> a, empty mode
@@ -17,6 +40,7 @@ module Deps_or_facts = struct
     match mode with
     | Lazy -> Dep.Set.union a b
     | Eager -> Dep.Facts.union a b
+    | Eager_reaching _ -> Dep.Facts.union a b
   ;;
 
   let union_all : type m. m eval_mode -> m list -> m =
@@ -24,6 +48,7 @@ module Deps_or_facts = struct
     match mode with
     | Lazy -> Dep.Set.union_all list
     | Eager -> Dep.Facts.union_all list
+    | Eager_reaching _ -> Dep.Facts.union_all list
   ;;
 end
 
@@ -123,11 +148,60 @@ end
 
 include T
 
+(* A failure in a [Memo.t] run by the builder can hide deps: it may have been
+   building one, as a [%{read:...}] does. *)
+let watch_memo : type a m. m eval_mode -> a Memo.t -> a Memo.t =
+  fun mode memo ->
+  match mode with
+  | Lazy | Eager -> memo
+  | Eager_reaching reached ->
+    Fiber.with_error_handler
+      (fun () -> Memo.run memo)
+      ~on_error:(fun exn ->
+        reached.hidden <- true;
+        Exn_with_backtrace.reraise exn)
+    |> Memo.of_reproducible_fiber
+;;
+
+(* A memoized builder is shared, so the deps it reached before failing are not
+   seen here. Its lazy evaluation stands in for them; this can force builds of
+   its own, attributed to [reached.recovery]. *)
+let reach_memoized
+      (reached : Reached.t)
+      (eager : unit -> ('a * Dep.Facts.t) Memo.t)
+      (lazy_ : unit -> ('a * Dep.Set.t) Memo.t)
+  =
+  let open Fiber.O in
+  Fiber.with_error_handler
+    (fun () ->
+       let+ ((_, facts) as res) = Memo.run (eager ()) in
+       Reached.add reached (Dep.Set.of_keys facts);
+       res)
+    ~on_error:(fun exn ->
+      let+ () =
+        match Scheduler.Run.caused_by_cancellation exn with
+        | true -> Fiber.return ()
+        | false ->
+          Fiber.collect_errors (fun () ->
+            Forced_by.set ~new_forcer:reached.recovery lazy_ ())
+          >>| (function
+           | Ok (_, deps) -> Reached.add reached deps
+           | Error (_ : Exn_with_backtrace.t list) -> reached.hidden <- true)
+      in
+      Exn_with_backtrace.reraise exn)
+  |> Memo.of_reproducible_fiber
+;;
+
 let force_memoized : type a m. m eval_mode -> a memoized -> (a * m) Memo.t =
   fun mode { lazy_; eager } ->
   match mode with
   | Lazy -> Memo.Lazy.force (Lazy.force lazy_)
   | Eager -> Memo.Lazy.force eager
+  | Eager_reaching reached ->
+    reach_memoized
+      reached
+      (fun () -> Memo.Lazy.force eager)
+      (fun () -> Memo.Lazy.force (Lazy.force lazy_))
 ;;
 
 let rec eval : type a m. a t -> m eval_mode -> (a * m) Memo.t =
@@ -208,33 +282,33 @@ let rec eval : type a m. a t -> m eval_mode -> (a * m) Memo.t =
     (), deps
   | Of_memo memo ->
     let open Memo.O in
-    let+ x = memo in
+    let+ x = watch_memo mode memo in
     x, Deps_or_facts.empty mode
   | Map_memo (memo, f) ->
     let open Memo.O in
-    let+ x = memo in
+    let+ x = watch_memo mode memo in
     Deps_or_facts.return (f x) mode
   | Map_memo2 (memo, f1, f2) ->
     let open Memo.O in
-    let+ x = memo in
+    let+ x = watch_memo mode memo in
     Deps_or_facts.return (f2 (f1 x)) mode
   | Map_memo3 (memo, f1, f2, f3) ->
     let open Memo.O in
-    let+ x = memo in
+    let+ x = watch_memo mode memo in
     Deps_or_facts.return (f3 (f2 (f1 x))) mode
   | Bind_memo (memo, f) ->
     let open Memo.O in
-    let* x = memo in
+    let* x = watch_memo mode memo in
     eval (f x) mode
   | Bind_memo2 (memo, f1, f2) ->
     let open Memo.O in
-    let* x = memo in
+    let* x = watch_memo mode memo in
     let* y, deps1 = eval (f1 x) mode in
     let+ z, deps2 = eval (f2 y) mode in
     z, Deps_or_facts.union mode deps1 deps2
   | Bind_memo3 (memo, f1, f2, f3) ->
     let open Memo.O in
-    let* x = memo in
+    let* x = watch_memo mode memo in
     let* y, deps1 = eval (f1 x) mode in
     let* z, deps2 = eval (f2 y) mode in
     let+ result, deps3 = eval (f3 z) mode in
@@ -242,7 +316,7 @@ let rec eval : type a m. a t -> m eval_mode -> (a * m) Memo.t =
     result, Deps_or_facts.union mode deps deps3
   | Bind_memo_map (memo, f1, f2) ->
     let open Memo.O in
-    let* x = memo in
+    let* x = watch_memo mode memo in
     let+ y, deps = eval (f1 x) mode in
     f2 y, deps
   | Record { res; deps; f } ->
@@ -251,19 +325,30 @@ let rec eval : type a m. a t -> m eval_mode -> (a * m) Memo.t =
      | Eager ->
        let open Memo.O in
        let+ facts = Dep.Facts.record_facts deps ~f in
+       res, facts
+     | Eager_reaching reached ->
+       Reached.add reached deps;
+       let open Memo.O in
+       let+ facts = Dep.Facts.record_facts deps ~f in
        res, facts)
   | Record_success memo ->
     (match mode with
      | Lazy -> Memo.return ((), Dep.Set.empty)
-     | Eager ->
+     | Eager | Eager_reaching _ ->
        let open Memo.O in
        let+ () = memo in
-       (), Dep.Facts.empty)
+       Deps_or_facts.return () mode)
   | Memoize memoized -> force_memoized mode memoized
   | Goal t ->
+    (* A goal's deps are not the builder's, so they are not reached. *)
     let open Memo.O in
-    let+ a, _ = eval t mode in
-    a, Deps_or_facts.empty mode
+    (match mode with
+     | Lazy | Eager ->
+       let+ a, _ = eval t mode in
+       a, Deps_or_facts.empty mode
+     | Eager_reaching _ ->
+       let+ a, _ = eval t Eager in
+       a, Dep.Facts.empty)
   | Exec_memo (m, i) -> exec_memo_eval m i mode
   | Push_stack_frame (human_readable_description, f) ->
     Memo.push_stack_frame ~human_readable_description (fun () -> eval (f ()) mode)
@@ -283,6 +368,11 @@ and exec_memo_eval : type i o m. (i, o) memo -> i -> m eval_mode -> (o * m) Memo
   match mode with
   | Lazy -> Memo.exec (Lazy.force memo.lazy_) i
   | Eager -> Memo.exec (Lazy.force memo.eager) i
+  | Eager_reaching reached ->
+    reach_memoized
+      reached
+      (fun () -> Memo.exec (Lazy.force memo.eager) i)
+      (fun () -> Memo.exec (Lazy.force memo.lazy_) i)
 ;;
 
 let memoize ?cutoff name t =
@@ -319,6 +409,14 @@ end
 
 let evaluate_and_collect_deps t = eval t Lazy
 let evaluate_and_collect_facts t = eval t Eager
+
+let evaluate_and_collect_facts_reaching reached t =
+  match reached with
+  | None -> eval t Eager
+  | Some (reached : Reached.t) ->
+    reached.started <- true;
+    eval t (Eager_reaching reached)
+;;
 
 let create_memo name ~input ?cutoff ?human_readable_description f =
   let human_readable_description =

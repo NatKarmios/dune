@@ -60,9 +60,8 @@ depends on the state of the shared cache, not on this test.
   _build/default/dep.txt action-fail
   _build/default/out.txt dep-fail
 
-The rule that failed while building its dependencies still reports them: they
-are recovered without building anything, so the graph records the edge that
-caused the failure.
+The rule that failed while building its dependencies still reports the ones its
+evaluation reached, so the graph records the edge that caused the failure.
 
   $ dune trace cat | jq -sc '
   >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
@@ -154,8 +153,8 @@ cancellation after a memo node has wrapped it in Memo.Error.E as well:
 Building a dep records what it resolved to even when building it fails. A file
 dep resolves to its producing rule (unless it is in the source tree), a glob to
 the files it matched, and an alias to its expansion; the first two are known
-before the building that fails, and the alias's is recovered by re-walking its
-definitions without building them.
+before the building that fails, and the alias's is the deps that evaluating
+its definitions reached.
 
   $ rm -rf _build
   $ touch a.src b.src
@@ -216,7 +215,7 @@ rule, the dep's span therefore outlives that rule's exec-rule span:
   > '
   true
 
-The alias's recovered expansion includes the dep whose build failed:
+The alias's reached expansion includes the dep whose build failed:
 
   $ dune trace cat | jq -sc '
   >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
@@ -229,11 +228,10 @@ The alias's recovered expansion includes the dep whose build failed:
   > '
   [["_build/default/boom.txt"]]
 
-When a rule's deps cannot be recovered either, the end event states it
-explicitly, to distinguish it from a rule with no deps. This happens for
-computations that run even under lazy evaluation (e.g. Of_memo): a %{read:...}
-pform is an Of_memo that builds the file it reads, so its failure is cached and
-recovery re-enters it.
+When a failure hides some of a rule's deps, the end event states that they are
+unknown, to distinguish it from a rule with no deps. A failing Of_memo does
+this, since it may have been building a dep: a %{read:...} pform is an Of_memo
+that builds the file it reads.
 
   $ rm -rf _build
   $ cat >dune <<EOF
@@ -248,8 +246,8 @@ recovery re-enters it.
   $ DUNE_TRACE=+graph dune build r-out.txt 2>/dev/null
   [1]
 
-A rule that fails in its action has known (empty) deps; one whose recovery
-failed is marked unknown instead:
+A rule that fails in its action has known (empty) deps; one whose deps were
+hidden is marked unknown instead:
 
   $ dune trace cat | jq -sr '
   >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
@@ -267,17 +265,14 @@ failed is marked unknown instead:
   r-dep.txt action-fail deps_unknown=false
   r-out.txt dep-fail deps_unknown=true
 
-Recovering a rule's deps runs its action builder without building anything, but
-this still runs its Of_memo nodes, which can force a build of their own. Such a
-build is attributed to the recovery rather than to the rule, so it is clear it
-happened after the rule had already failed.
+A rule that fails before resolving its deps reports the ones its evaluation
+reached, so reporting them forces nothing that the failure stopped. Anything
+sequenced after the failing dep is never forced.
 
-Reaching one takes a specific shape: eager evaluation stops at the dep whose
-build fails, so anything sequenced after it is never forced; lazy evaluation
-skips the building and carries on, reaching it for the first time. "diff?"
-demonstrates this: its first argument becomes a dep, and the continuation folds
-Action_builder.if_file_exists over the optional ones. For a file under a
-directory target, if_file_exists builds that directory.
+"diff?" demonstrates this: its first argument becomes a dep, and the
+continuation folds Action_builder.if_file_exists over the optional ones. For a
+file under a directory target, if_file_exists builds that directory, but only
+once bang.txt has been built, which never happens.
 
   $ rm -rf _build
   $ cat >dune <<EOF
@@ -299,8 +294,7 @@ directory target, if_file_exists builds that directory.
   $ DUNE_TRACE=+graph dune build out3.txt 2>/dev/null
   [1]
 
-The directory target's build is forced by the recovery, naming the rule whose
-deps were being recovered:
+Nothing is forced by recovering deps:
 
   $ dune trace cat | jq -sr '
   >   (reduce (.[] | select(.name == "intern") | .args.entries[]) as $e
@@ -313,11 +307,9 @@ deps were being recovered:
   >         + " <- recovering " + $rules[.args.forced_by[1] | tostring] ]
   >   | sort[]
   > '
-  build-dep _build/default/a-dir <- recovering out3.txt
 
-A build forced by the recovery can fail in its own right. Its error is not
-reported to the user, but its action still runs: a-dir's rule executes and
-fails although nothing the user asked for needs it.
+Nor is the directory target's rule executed, even when it would fail in its
+own right:
 
   $ rm -rf _build
   $ cat >dune <<EOF
@@ -356,6 +348,5 @@ fails although nothing the user asked for needs it.
   >       | $t + " " + .args.rule_outcome ]
   >   | sort[]
   > '
-  a-dir action-fail
   bang.txt action-fail
   out3.txt dep-fail
