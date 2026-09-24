@@ -54,12 +54,44 @@ end
 module Track : sig
   type t
 
-  val process : uuid:int -> pid:int -> name:string -> t
-  val thread : uuid:int -> parent_uuid:int -> pid:int -> tid:int -> name:string -> t
+  (** How the UI orders a track's children ([TrackDescriptor.child_ordering]).
+      [Explicit] sorts children by their [sibling_order_rank], lowest first;
+      children without a rank count as 0. *)
+  module Child_ordering : sig
+    type t =
+      | Lexicographic
+      | Chronological
+      | Explicit
+  end
+
+  val process
+    :  uuid:int
+    -> pid:int
+    -> name:string
+    -> ?child_ordering:Child_ordering.t
+    -> unit
+    -> t
+
+  val thread
+    :  uuid:int
+    -> parent_uuid:int
+    -> pid:int
+    -> tid:int
+    -> name:string
+    -> ?sibling_order_rank:int
+    -> unit
+    -> t
 
   (** A generic track nested under [parent_uuid], with no thread/process
       association. Used for async slices. *)
-  val child : uuid:int -> parent_uuid:int -> name:string -> t
+  val child
+    :  uuid:int
+    -> parent_uuid:int
+    -> name:string
+    -> ?child_ordering:Child_ordering.t
+    -> ?sibling_order_rank:int
+    -> unit
+    -> t
 end
 
 (** A slice boundary or instant placed on a track. A [Begin]/[End] pair on the

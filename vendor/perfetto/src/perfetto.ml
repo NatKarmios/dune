@@ -48,6 +48,25 @@ module Proto = struct
 end
 
 module Track = struct
+  module Child_ordering = struct
+    type t =
+      | Lexicographic
+      | Chronological
+      | Explicit
+
+    let to_int = function
+      | Lexicographic -> 1
+      | Chronological -> 2
+      | Explicit -> 3
+    ;;
+
+    let to_string = function
+      | Lexicographic -> "LEXICOGRAPHIC"
+      | Chronological -> "CHRONOLOGICAL"
+      | Explicit -> "EXPLICIT"
+    ;;
+  end
+
   type kind =
     | Process of { pid : int }
     | Thread of
@@ -61,16 +80,35 @@ module Track = struct
     { uuid : int
     ; track_name : string
     ; track_kind : kind
+    ; child_ordering : Child_ordering.t option
+    ; sibling_order_rank : int option
     }
 
-  let process ~uuid ~pid ~name = { uuid; track_name = name; track_kind = Process { pid } }
-
-  let thread ~uuid ~parent_uuid ~pid ~tid ~name =
-    { uuid; track_name = name; track_kind = Thread { parent_uuid; pid; tid } }
+  let process ~uuid ~pid ~name ?child_ordering () =
+    { uuid
+    ; track_name = name
+    ; track_kind = Process { pid }
+    ; child_ordering
+    ; sibling_order_rank = None
+    }
   ;;
 
-  let child ~uuid ~parent_uuid ~name =
-    { uuid; track_name = name; track_kind = Child { parent_uuid } }
+  let thread ~uuid ~parent_uuid ~pid ~tid ~name ?sibling_order_rank () =
+    { uuid
+    ; track_name = name
+    ; track_kind = Thread { parent_uuid; pid; tid }
+    ; child_ordering = None
+    ; sibling_order_rank
+    }
+  ;;
+
+  let child ~uuid ~parent_uuid ~name ?child_ordering ?sibling_order_rank () =
+    { uuid
+    ; track_name = name
+    ; track_kind = Child { parent_uuid }
+    ; child_ordering
+    ; sibling_order_rank
+    }
   ;;
 end
 
@@ -475,18 +513,22 @@ module To_bytes = struct
   let track buf (t : Track.t) =
     Wire.varint_field buf ~field:1 t.uuid;
     if t.track_name <> "" then Wire.string_field buf ~field:2 t.track_name;
-    match t.track_kind with
-    | Process { pid } ->
-      Wire.message_field buf ~field:3 (fun b ->
-        Wire.varint_field b ~field:1 pid;
-        if t.track_name <> "" then Wire.string_field b ~field:6 t.track_name)
-    | Thread { parent_uuid; pid; tid } ->
-      Wire.varint_field buf ~field:5 parent_uuid;
-      Wire.message_field buf ~field:4 (fun b ->
-        Wire.varint_field b ~field:1 pid;
-        Wire.varint_field b ~field:2 tid;
-        if t.track_name <> "" then Wire.string_field b ~field:5 t.track_name)
-    | Child { parent_uuid } -> Wire.varint_field buf ~field:5 parent_uuid
+    (match t.track_kind with
+     | Process { pid } ->
+       Wire.message_field buf ~field:3 (fun b ->
+         Wire.varint_field b ~field:1 pid;
+         if t.track_name <> "" then Wire.string_field b ~field:6 t.track_name)
+     | Thread { parent_uuid; pid; tid } ->
+       Wire.varint_field buf ~field:5 parent_uuid;
+       Wire.message_field buf ~field:4 (fun b ->
+         Wire.varint_field b ~field:1 pid;
+         Wire.varint_field b ~field:2 tid;
+         if t.track_name <> "" then Wire.string_field b ~field:5 t.track_name)
+     | Child { parent_uuid } -> Wire.varint_field buf ~field:5 parent_uuid);
+    Option.iter
+      (fun o -> Wire.varint_field buf ~field:11 (Track.Child_ordering.to_int o))
+      t.child_ordering;
+    Option.iter (Wire.varint_field buf ~field:12) t.sibling_order_rank
   ;;
 
   let packet buf = function
@@ -583,6 +625,10 @@ module To_text = struct
        if t.track_name <> "" then line (i + 1) "thread_name: %S" t.track_name;
        line i "}"
      | Child { parent_uuid } -> line i "parent_uuid: %d" parent_uuid);
+    Option.iter
+      (fun o -> line i "child_ordering: %s" (Track.Child_ordering.to_string o))
+      t.child_ordering;
+    Option.iter (line i "sibling_order_rank: %d") t.sibling_order_rank;
     line indent "}"
   ;;
 

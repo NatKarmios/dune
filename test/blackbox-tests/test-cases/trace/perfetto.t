@@ -86,6 +86,23 @@ dynamic-includes), the "processes" track, and its single job track.
   $ grep -q 'name: "gen-rules"' dump.textpb && echo yes
   yes
 
+The "dune" process orders its child tracks explicitly, by rank. Job tracks have
+no rank, and keep perfetto's default order under "processes":
+
+  $ grep -c 'child_ordering: EXPLICIT' dump.textpb
+  1
+  $ awk '
+  >   /^    name: / { name = $2 }
+  >   /^    sibling_order_rank: / { print $2, name }
+  > ' dump.textpb | sort -n
+  0 "main"
+  1 "gen-rules"
+  3 "build-dep"
+  4 "exec-rule"
+  5 "exec-rule-action"
+  6 "processes"
+  7 "dune-graph"
+
 Each kind's lifecycle is a start instant (at the begin timestamp) and a finish
 instant carrying `dur_ns`, associated via the relevant rule or dep ID.
 

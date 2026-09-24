@@ -379,6 +379,22 @@ module Track_uuid = struct
 
   (* Slot tracks are allocated as needed, so their uuids cannot be fixed. *)
   let first_dynamic = 10
+
+  (* The order the tracks directly under [process] are shown in. *)
+  let sibling_order_rank uuid =
+    List.findi
+      [ main_thread
+      ; gen_rules
+      ; dynamic_includes
+      ; build_dep
+      ; exec_rule
+      ; exec_rule_action
+      ; processes
+      ; graph
+      ]
+      ~f:(Int.equal uuid)
+    |> Option.map ~f:snd
+  ;;
 end
 
 (* One track of the "job-NNN" pool that process slices are laid out on. *)
@@ -529,7 +545,13 @@ let ensure_root_process t =
     t.declared_process <- true;
     push
       t
-      (P.Track_descriptor (P.Track.process ~uuid:Track_uuid.process ~pid:0 ~name:"dune"));
+      (P.Track_descriptor
+         (P.Track.process
+            ~uuid:Track_uuid.process
+            ~pid:0
+            ~name:"dune"
+            ~child_ordering:Explicit
+            ()));
     push
       t
       (P.Track_descriptor
@@ -538,7 +560,9 @@ let ensure_root_process t =
             ~parent_uuid:Track_uuid.process
             ~pid:0
             ~tid:0
-            ~name:"main")))
+            ~name:"main"
+            ?sibling_order_rank:(Track_uuid.sibling_order_rank Track_uuid.main_thread)
+            ())))
 ;;
 
 let ensure_track t uuid ~parent_uuid ~name =
@@ -546,7 +570,15 @@ let ensure_track t uuid ~parent_uuid ~name =
   | Some () -> ()
   | None ->
     Table.set t.declared_tracks uuid ();
-    push t (P.Track_descriptor (P.Track.child ~uuid ~parent_uuid ~name))
+    push
+      t
+      (P.Track_descriptor
+         (P.Track.child
+            ~uuid
+            ~parent_uuid
+            ~name
+            ?sibling_order_rank:(Track_uuid.sibling_order_rank uuid)
+            ()))
 ;;
 
 let record_interns t rest =

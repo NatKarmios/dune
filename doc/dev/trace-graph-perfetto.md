@@ -66,14 +66,17 @@ unaffected by the Perfetto conversion: it renders the csexp events directly.
 |-------|----------|
 | `dune` | the process; parent of everything below |
 | `main` | thread; every non-async event (complete events become slices, the rest instants) |
-| `exec-rule` | rule lifecycle instants |
-| `exec-rule-action` | action lifecycle instants (executed rules only) |
-| `build-dep` | dependency lifecycle instants |
 | `gen-rules` | rule-generation lifecycle instants |
 | `dynamic-includes` | dune-file processing lifecycle instants |
-| `dune-graph` | graph blob chunks (instants) |
+| `build-dep` | dependency lifecycle instants |
+| `exec-rule` | rule lifecycle instants |
+| `exec-rule-action` | action lifecycle instants (executed rules only) |
 | `processes` | parent of the process slice pool |
 | `job-001`, `job-002`, … | spawned processes as real slices, one track per concurrent process |
+| `dune-graph` | graph blob chunks (instants) |
+
+The table is in display order: `dune` sets `child_ordering: EXPLICIT` and gives
+each track under it a `sibling_order_rank`. Job tracks have no rank.
 
 Every graph track holds *instants*, never slices. Instants have no extent, so
 unrelated events share one track without Perfetto's stack-nesting semantics
